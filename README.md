@@ -13,9 +13,14 @@ A plugin for vatSys that saves and restores window layouts, ASD (display) state,
 - UI integration via a `Window Layouts` menu.
 
 ## Installation
-1. Build the plugin (or download a prebuilt `vatSysWindowManager.dll`) that matches your vatSys installation.
-2. Install the plugin according to vatSys plugin installation instructions (typically copying the plugin DLL into the vatSys `Plugins` directory or registering the plugin with the application).
-3. Start vatSys. After the UI is ready the plugin will add a `Window Layouts` menu to the vatSys main menu.
+- Download the plugin from the releases section: https://github.com/RealLeviticus/vatSysWindowManager/releases
+- Right-click the downloaded ZIP file, select `Properties`, and click `Unblock` (if present).
+- Unzip the archive.
+- Copy the plugin DLL (and the `Layouts` folder, if present) to the base vatSys plugins directory:
+  - `[...]\Program Files (x86)\vatSys\bin\Plugins`
+- Start vatSys and verify the plugin is installed by checking `Info > About`.
+- Ensure the following setting is turned on in vatSys so position/activity is available to the plugin:
+  - `Settings > Activity Privacy > Display current activity as a status message`
 
 Notes:
 - The plugin targets .NET Framework 4.7.2 and uses `Newtonsoft.Json` and `PInvoke`.
