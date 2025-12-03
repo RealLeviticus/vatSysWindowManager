@@ -4,10 +4,11 @@ A plugin for vatSys that saves and restores window layouts, ASD (display) state,
 
 ## Features
 - Save the current vatSys window layout (window positions, size, show state).
-- Restore saved layouts for the current position.
+- Restore saved layouts for the current position (layouts are only visible/usable in the position they were saved for).
 - Auto-load a chosen layout for a given position.
+- Remember the controller's selected sectors and re-apply them on restore.
 - Save and restore ASD state (center coordinates and range (range not working yet) ).
-- Restore window-specific metadata where available: chat recipients, ATIS callsigns, sequence/arrival windows, strip windows (beacon/type/state), checked map layers, ASD display position/type and range.
+- Restore window-specific metadata where available: chat recipients, ATIS callsigns, sequence/arrival windows, strip windows (beacon/type/state), checked map layers, ASD display position/type and range (with retries for display position to catch late UI init).
 - Manage plugin-created windows (they will be closed before a restore).
 - Manage Z-order for non-main windows to keep tool windows on top.
 - UI integration via a `Window Layouts` menu.
@@ -34,11 +35,13 @@ Notes:
     - `Load` — apply the layout immediately.
     - `Auto load for this position` — toggle automatic loading for that position.
     - `Delete` — remove the layout file.
-  - `Load current position layout` — attempts to restore the layout for the current position (respects the autoload map, legacy single-file layout, or falls back to the first available layout).
 
 Behavior details:
 - When restoring, plugin closes any plugin-created windows it previously opened, then re-creates windows found in the saved snapshot.
-- If a saved layout included ASD state, the ASD center and range are applied.
+- Any open vatSys windows not present in the target layout (except the main form) are closed during restore to match the saved snapshot.
+- If a layout saved controlled sectors, those sectors are re-applied during restore (when they exist in the current data set).
+- If a saved layout included ASD state, the ASD center and range are applied; ASD windows remember their view center and zoom level.
+- Automatic restore on startup/position change only happens when an `Auto load for this position` mapping exists; otherwise layouts stay idle until you load one from the menu.
 - For some window types (chat/PM, ATIS, sequence/arrival, strips) the plugin will use vatSys API methods to open the right window with the saved parameters.
 - Map layers and ASD range are applied when possible.
 
