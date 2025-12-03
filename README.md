@@ -28,7 +28,7 @@ Notes:
 
 ## Usage
 - Open vatSys and set up the windows and ASD exactly as you want them saved.
-- From the main vatSys menu: `Window Layouts`:
+- From the Windows vatSys menu: `Window Layouts`:
   - `Save current layout` — saves a snapshot. You'll be prompted for a layout name (default is the current position).
   - `Layouts` — opens a hierarchical menu grouped by position. For each saved layout you can:
     - `Load` — apply the layout immediately.
