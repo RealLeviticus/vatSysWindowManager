@@ -41,7 +41,7 @@ namespace vatSysWindowManager
             reloadLayoutMenuItem = new ToolStripMenuItem("Load current position layout");
             reloadLayoutMenuItem.Click += (s, e) => RestoreLayoutForCurrentPosition();
 
-            rootMenuItem = new ToolStripMenuItem("Window layouts");
+            rootMenuItem = new ToolStripMenuItem("Window Layouts");
             rootMenuItem.DropDownItems.Add(saveLayoutMenuItem);
             rootMenuItem.DropDownItems.Add(loadLayoutMenuItem);
             rootMenuItem.DropDownItems.Add(new ToolStripSeparator());
