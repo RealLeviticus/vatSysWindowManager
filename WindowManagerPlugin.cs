@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Newtonsoft.Json;
@@ -94,7 +95,11 @@ namespace vatSysWindowManager
                 var field = typeof(MMI).GetField("PrimePositonChanged", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 if (field == null) return;
 
-                primePositionChangedHandler = (s, e) => RunOnUiThread(() => RestoreLayoutForCurrentPosition(requireAutoLoad: true));
+                primePositionChangedHandler = (s, e) => RunOnUiThread(() =>
+                {
+                    CloseNonDefaultOnPositionChange();
+                    RestoreLayoutForCurrentPosition(requireAutoLoad: true);
+                });
                 var current = field.GetValue(null) as EventHandler;
                 current += primePositionChangedHandler;
                 field.SetValue(null, current);
@@ -565,11 +570,7 @@ namespace vatSysWindowManager
             if (window != null && placement != null)
             {
                 ApplyPlacement(window, placement.Value, entry.Metadata);
-                if (IsVsCs(entry))
-                {
-                    EnsureVsCsPlacement(window, placement.Value, entry.Metadata);
-                }
-                else if (IsOzStrips(entry))
+                if (IsOzStrips(entry))
                 {
                     EnsureOzStripsPlacement(window, placement.Value, entry.Metadata);
                 }
@@ -1005,15 +1006,7 @@ namespace vatSysWindowManager
                 var placement = entry.Placement?.ToWindowPlacement();
                 if (placement == null) continue;
 
-                if (IsVsCs(entry))
-                {
-                    var vs = GetVsCsWindow() ?? FindExisting(entry);
-                    if (vs != null)
-                    {
-                        EnsureVsCsPlacement(vs, placement.Value, entry.Metadata);
-                    }
-                }
-                else if (IsOzStrips(entry))
+                if (IsOzStrips(entry))
                 {
                     var oz = FindOzStripsByTitle() ?? FindExisting(entry);
                     if (oz != null)
@@ -1500,6 +1493,49 @@ namespace vatSysWindowManager
             pluginWindows.Clear();
         }
 
+        private void CloseNonDefaultOnPositionChange()
+        {
+            try
+            {
+                ClosePluginWindows();
+                TryCloseOzStrips();
+
+                foreach (Form form in Application.OpenForms)
+                {
+                    if (form == null || form.IsDisposed) continue;
+                    if (IsMainVatSysForm(form)) continue;
+                    if (IsVsCs(form)) continue; // keep VSCS alive
+                    if (IsOzStrips(form)) { TryCloseOzStrips(); continue; }
+
+                    try
+                    {
+                        form.Close();
+                    }
+                    catch { }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void TryCloseOzStrips()
+        {
+            try
+            {
+                var oz = FindOzStripsByTitle();
+                if (oz != null && !oz.IsDisposed)
+                {
+                    oz.Close();
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
         private double? GetRangeValue(Control asdControl)
         {
             try
@@ -1981,86 +2017,6 @@ namespace vatSysWindowManager
             }
 
             return desiredShow;
-        }
-
-        private void EnsureVsCsPlacement(Form form, User32.WINDOWPLACEMENT placement, Dictionary<string, string> metadata)
-        {
-            if (form == null || form.IsDisposed) return;
-            if (!IsVsCs(form)) return;
-
-            var targetRect = GetTargetRect(placement, metadata);
-            var desiredShow = GetDesiredShow(metadata, placement.showCmd, out var desiredFormState);
-
-            void Reapply()
-            {
-                if (form == null || form.IsDisposed) return;
-                try
-                {
-                    if (!form.IsHandleCreated)
-                    {
-                        var _ = form.Handle;
-                    }
-
-                    var width = targetRect.right - targetRect.left;
-                    var height = targetRect.bottom - targetRect.top;
-
-                    form.StartPosition = FormStartPosition.Manual;
-                    form.WindowState = FormWindowState.Normal;
-
-                    if (width > 0 && height > 0)
-                    {
-                        try
-                        {
-                            var savedField = form.GetType().GetField("savedState", BindingFlags.Instance | BindingFlags.NonPublic);
-                            if (savedField != null)
-                            {
-                                savedField.SetValue(form, placement);
-                            }
-                            var usePlacementField = form.GetType().BaseType?.GetField("usePlacement", BindingFlags.Instance | BindingFlags.NonPublic);
-                            if (usePlacementField != null)
-                            {
-                                usePlacementField.SetValue(form, true);
-                            }
-                        }
-                        catch
-                        {
-                            // ignore
-                        }
-
-                        User32.SetWindowPlacement(form.Handle, placement);
-                        form.DesktopBounds = new Rectangle(targetRect.left, targetRect.top, width, height);
-                        User32.MoveWindow(form.Handle, targetRect.left, targetRect.top, width, height, true);
-                    }
-
-                    User32.ShowWindow(form.Handle, desiredShow);
-                    if (desiredFormState == FormWindowState.Maximized)
-                    {
-                        form.WindowState = FormWindowState.Maximized;
-                    }
-                }
-                catch
-                {
-                    // ignore
-                }
-            }
-
-            try
-            {
-                if (form.InvokeRequired)
-                {
-                    form.BeginInvoke(new Action(Reapply));
-                }
-                else
-                {
-                    Reapply();
-                }
-            }
-            catch
-            {
-                // ignore
-            }
-
-            SchedulePlacementRetries(form, Reapply, targetRect, 0, 150, 400, 800, 1400, 2200);
         }
 
         private void EnsureOzStripsPlacement(Form form, User32.WINDOWPLACEMENT placement, Dictionary<string, string> metadata)
