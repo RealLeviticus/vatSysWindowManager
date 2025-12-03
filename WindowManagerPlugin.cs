@@ -2060,7 +2060,7 @@ namespace vatSysWindowManager
                 // ignore
             }
 
-            SchedulePlacementRetries(form, Reapply, 0, 150, 400, 800, 1400, 2200);
+            SchedulePlacementRetries(form, Reapply, targetRect, 0, 150, 400, 800, 1400, 2200);
         }
 
         private void EnsureOzStripsPlacement(Form form, User32.WINDOWPLACEMENT placement, Dictionary<string, string> metadata)
@@ -2074,7 +2074,8 @@ namespace vatSysWindowManager
                 ApplyPlacement(form, placement, metadata);
             }
 
-            SchedulePlacementRetries(form, Reapply, 120, 350, 800, 1500, 2500);
+            var targetRect = GetTargetRect(placement, metadata);
+            SchedulePlacementRetries(form, Reapply, targetRect, 120, 350, 800, 1500, 2500);
         }
 
         private void EnsureOzStripsPlacementWhenAvailable(WindowLayoutEntry entry)
@@ -2082,6 +2083,7 @@ namespace vatSysWindowManager
             if (entry?.Placement == null) return;
             var placement = entry.Placement.ToWindowPlacement();
             var metadata = entry.Metadata;
+            var targetRect = placement.rcNormalPosition;
 
             var delays = new[] { 0, 200, 500, 900, 1500, 2500, 3500 };
             foreach (var delay in delays)
@@ -2094,6 +2096,11 @@ namespace vatSysWindowManager
                         var oz = FindOzStripsByTitle() ?? FindExisting(entry);
                         if (oz != null)
                         {
+                            if (IsWindowInPlace(oz.Handle, targetRect))
+                            {
+                                return;
+                            }
+
                             EnsureOzStripsPlacement(oz, placement, metadata);
                         }
                     }
@@ -2107,6 +2114,12 @@ namespace vatSysWindowManager
 
         private void SchedulePlacementRetries(Form form, Action applyAction, params int[] delaysMs)
         {
+            var empty = new RECT();
+            SchedulePlacementRetries(form, applyAction, empty, delaysMs);
+        }
+
+        private void SchedulePlacementRetries(Form form, Action applyAction, RECT targetRect, params int[] delaysMs)
+        {
             if (applyAction == null || form == null || form.IsDisposed) return;
 
             foreach (var delay in delaysMs ?? Array.Empty<int>())
@@ -2117,6 +2130,12 @@ namespace vatSysWindowManager
                     {
                         System.Threading.Thread.Sleep(Math.Max(0, delay));
                         if (form.IsDisposed) return;
+
+                        if (IsWindowInPlace(form.Handle, targetRect))
+                        {
+                            return;
+                        }
+
                         if (form.InvokeRequired)
                         {
                             form.BeginInvoke(applyAction);
@@ -2131,6 +2150,27 @@ namespace vatSysWindowManager
                         // ignore
                     }
                 });
+            }
+        }
+
+        private bool IsWindowInPlace(IntPtr handle, RECT targetRect, int tolerance = 1)
+        {
+            try
+            {
+                if (handle == IntPtr.Zero) return false;
+                if (!User32.GetWindowRect(handle, out var current)) return false;
+
+                var width = targetRect.right - targetRect.left;
+                var height = targetRect.bottom - targetRect.top;
+
+                return Math.Abs(current.left - targetRect.left) <= tolerance &&
+                       Math.Abs(current.top - targetRect.top) <= tolerance &&
+                       Math.Abs((current.right - current.left) - width) <= tolerance &&
+                       Math.Abs((current.bottom - current.top) - height) <= tolerance;
+            }
+            catch
+            {
+                return false;
             }
         }
 
