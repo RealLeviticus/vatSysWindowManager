@@ -89,6 +89,3 @@ You can manually edit `autoload.json` if you need to set autoload entries outsid
 ## License & Warranty
 - Use at your own risk. The plugin is provided without warranty. Review the repository LICENSE file (if present) for license details.
 
----
-
-If you want, I can produce a compact `README.md` pull request-ready file or adjust wording to match an existing project README style.
