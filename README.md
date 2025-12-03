@@ -6,7 +6,7 @@ A plugin for vatSys that saves and restores window layouts, ASD (display) state,
 - Save the current vatSys window layout (window positions, size, show state).
 - Restore saved layouts for the current position.
 - Auto-load a chosen layout for a given position.
-- Save and restore ASD state (center coordinates and range).
+- Save and restore ASD state (center coordinates and range (range not working yet) ).
 - Restore window-specific metadata where available: chat recipients, ATIS callsigns, sequence/arrival windows, strip windows (beacon/type/state), checked map layers, ASD display position/type and range.
 - Manage plugin-created windows (they will be closed before a restore).
 - Manage Z-order for non-main windows to keep tool windows on top.
@@ -19,17 +19,17 @@ A plugin for vatSys that saves and restores window layouts, ASD (display) state,
 
 Notes:
 - The plugin targets .NET Framework 4.7.2 and uses `Newtonsoft.Json` and `PInvoke`.
-- The plugin uses reflection against internal vatSys types — incompatible vatSys versions may break functionality.
+- The plugin uses reflection against internal vatSys types â€” incompatible vatSys versions may break functionality.
 
 ## Usage
 - Open vatSys and set up the windows and ASD exactly as you want them saved.
 - From the main vatSys menu: `Window Layouts`:
-  - `Save current layout` — saves a snapshot. You'll be prompted for a layout name (default is the current position).
-  - `Layouts` — opens a hierarchical menu grouped by position. For each saved layout you can:
-    - `Load` — apply the layout immediately.
-    - `Auto load for this position` — toggle automatic loading for that position.
-    - `Delete` — remove the layout file.
-  - `Load current position layout` — attempts to restore the layout for the current position (respects the autoload map, legacy single-file layout, or falls back to the first available layout).
+  - `Save current layout` â€” saves a snapshot. You'll be prompted for a layout name (default is the current position).
+  - `Layouts` â€” opens a hierarchical menu grouped by position. For each saved layout you can:
+    - `Load` â€” apply the layout immediately.
+    - `Auto load for this position` â€” toggle automatic loading for that position.
+    - `Delete` â€” remove the layout file.
+  - `Load current position layout` â€” attempts to restore the layout for the current position (respects the autoload map, legacy single-file layout, or falls back to the first available layout).
 
 Behavior details:
 - When restoring, plugin closes any plugin-created windows it previously opened, then re-creates windows found in the saved snapshot.
@@ -61,12 +61,12 @@ You can manually edit `autoload.json` if you need to set autoload entries outsid
 
 ## Limitations and compatibility
 - The plugin relies on reflection into internal vatSys types and private members (e.g., ASD internals, `MMI` fields, `vatsys.*` types). Changes to vatSys internals may break the plugin.
-- Not all window state can be restored in every vatSys version — some controls or internal fields may not exist.
+- Not all window state can be restored in every vatSys version â€” some controls or internal fields may not exist.
 - The plugin tries to be resilient; failures during reflection are ignored and logged via `System.Diagnostics.Debug.WriteLine`.
 - Restores that require invoking non-public methods or setting private fields may be subject to permission and version constraints.
 
 ## Troubleshooting
-- Menu not visible: wait a short time after vatSys starts — the plugin waits for the UI to be ready before adding the menu. Ensure the plugin DLL is loaded by vatSys (check vatSys plugin logs if available).
+- Menu not visible: wait a short time after vatSys starts â€” the plugin waits for the UI to be ready before adding the menu. Ensure the plugin DLL is loaded by vatSys (check vatSys plugin logs if available).
 - Layout not applied: check that the layout file exists in the layout directory and that it contains the expected `Windows` entries.
 - ASD/range/maps not restored: vatSys internals may have changed; check debug output for reflection exceptions.
 - If windows fail to re-create, ensure vatSys APIs used by the plugin (for opening PM/ATIS/arrival/strip windows) are available in your vatSys version.
