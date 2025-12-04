@@ -26,7 +26,12 @@ namespace vatSysWindowManager
         private readonly HashSet<Form> pluginWindows = new HashSet<Form>();
         private readonly HashSet<Form> managedZOrder = new HashSet<Form>();
         private readonly Dictionary<string, string> autoLoadLayouts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<Form> windowsUsedDuringRestore = new HashSet<Form>();
         private bool menuRegistered;
+        private bool isRestoringLayout;
+        private readonly string arrivalLogPath;
+        private LayoutSnapshot lastArrivalSnapshot;
+        private HashSet<Form> lastArrivalDesired;
 
         public string Name => "WindowManager";
 
@@ -44,6 +49,9 @@ namespace vatSysWindowManager
 
             LoadAutoLoadMap();
 
+            arrivalLogPath = Path.Combine(LayoutRoot(), "arrival_debug.log");
+            SafeLogArrival("=== Plugin started ===");
+
             _ = Task.Run(async () =>
             {
                 var ready = await EnsureUiReady();
@@ -52,6 +60,7 @@ namespace vatSysWindowManager
                 await Task.Delay(1500);
                 RunOnUiThread(() => RestoreLayoutForCurrentPosition(requireAutoLoad: true));
                 RunOnUiThread(HookPrimePositionChanged);
+                RunOnUiThread(HookArrivalEvents);
             });
         }
 
@@ -108,6 +117,25 @@ namespace vatSysWindowManager
             {
                 System.Diagnostics.Debug.WriteLine($"WindowManager: failed to hook PrimePositonChanged: {ex}");
             }
+        }
+
+        private void HookArrivalEvents()
+        {
+            try
+            {
+                var addEvent = typeof(MMI).GetMethod("add_ArrivalListWindowsChanged", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                if (addEvent != null)
+                {
+                    EventHandler handler = (s, e) =>
+                    {
+                        DumpArrivalWindows("ArrivalListWindowsChanged");
+                        TryCleanupArrivalsFromEvent();
+                    };
+                    addEvent.Invoke(null, new object[] { handler });
+                }
+                DumpArrivalWindows("Initial arrival dump");
+            }
+            catch { }
         }
 
         private void RunOnUiThread(Action action)
@@ -238,6 +266,102 @@ namespace vatSysWindowManager
             }
         }
 
+        private void CloseAllArrivalWindows()
+        {
+            RunOnUiThread(() =>
+            {
+                try { MMI.CloseArrivalListWindows(); } catch { }
+                DumpArrivalWindows("After CloseArrivalListWindows");
+            });
+        }
+
+        private string InferStripMode(LayoutSnapshot snapshot)
+        {
+            try
+            {
+                if (snapshot?.Windows == null) return null;
+
+                foreach (var entry in snapshot.Windows)
+                {
+                    if (entry == null) continue;
+                    var meta = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (meta.TryGetValue("StripWindowType", out var type) &&
+                        string.Equals(type, "State", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return "State";
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private string GetStripModeName()
+        {
+            try
+            {
+                var prop = typeof(MMI).GetProperty("StripMode", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                var value = prop?.GetValue(null);
+                return value?.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void ApplyStripMode(string modeName)
+        {
+            if (string.IsNullOrWhiteSpace(modeName)) return;
+
+            try
+            {
+                var enumType = typeof(MMI).GetNestedType("StripModes", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic) ??
+                               Type.GetType("vatsys.MMI+StripModes");
+                if (enumType == null || !enumType.IsEnum) return;
+
+                var parsed = Enum.Parse(enumType, modeName, true);
+                RunOnUiThread(() =>
+                {
+                    try
+                    {
+                        var prop = typeof(MMI).GetProperty("StripMode", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        prop?.SetValue(null, parsed);
+                    }
+                    catch { }
+                });
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private IEnumerable<Form> GetArrivalWindowsFromMMI()
+        {
+            List<Form> result = new List<Form>();
+
+            try
+            {
+                var field = typeof(MMI).GetField("arrivalListsW", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var list = field?.GetValue(null) as System.Collections.IEnumerable;
+                if (list != null)
+                {
+                    foreach (var item in list)
+                    {
+                        if (item is Form f) result.Add(f);
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return result;
+        }
+
         private string LayoutRoot()
         {
             try
@@ -282,6 +406,28 @@ namespace vatSysWindowManager
             return string.IsNullOrWhiteSpace(safe) ? fallback : safe;
         }
 
+        private IEnumerable<Form> EnumerateFormsForSave()
+        {
+            var seen = new HashSet<IntPtr>();
+
+            foreach (Form form in Application.OpenForms)
+            {
+                if (form == null || form.IsDisposed) continue;
+                if (IsArrivalWindow(form) && !form.Visible) continue;
+                var handle = form.IsHandleCreated ? form.Handle : IntPtr.Zero;
+                if (handle != IntPtr.Zero && !seen.Add(handle)) continue;
+                yield return form;
+            }
+
+            foreach (var arrival in GetArrivalWindowsFromMMI())
+            {
+                if (arrival == null || arrival.IsDisposed) continue;
+                var handle = arrival.IsHandleCreated ? arrival.Handle : IntPtr.Zero;
+                if (handle != IntPtr.Zero && !seen.Add(handle)) continue;
+                yield return arrival;
+            }
+        }
+
         private void SaveLayoutForCurrentPosition()
         {
             try
@@ -297,14 +443,26 @@ namespace vatSysWindowManager
                     SavedUtc = DateTime.UtcNow,
                     Windows = new List<WindowLayoutEntry>(),
                     Asd = GetAsdState(),
-                    ControlledSectors = GetControlledSectorNames()
+                    ControlledSectors = GetControlledSectorNames(),
+                    StripMode = GetStripModeName()
                 };
 
-                foreach (Form form in Application.OpenForms)
+                foreach (Form form in EnumerateFormsForSave())
                 {
                     var entry = BuildEntry(form);
                     if (entry != null)
                     {
+                        if (entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
+                        {
+                            if (entry.Metadata != null && entry.Metadata.TryGetValue("Airport", out var ap))
+                            {
+                                SafeLogArrival($"Captured arrival window save: {ap} title={entry.Title}");
+                            }
+                            else
+                            {
+                                SafeLogArrival($"Captured arrival window save: (no airport) title={entry.Title}");
+                            }
+                        }
                         snapshot.Windows.Add(entry);
                     }
                 }
@@ -342,7 +500,10 @@ namespace vatSysWindowManager
         {
             try
             {
+                isRestoringLayout = true;
+                windowsUsedDuringRestore.Clear();
                 ClosePluginWindows();
+                CloseAllArrivalWindows();
 
                 if (!File.Exists(path)) return;
 
@@ -353,17 +514,36 @@ namespace vatSysWindowManager
                     MessageBox.Show($"Layout \"{snapshot.LayoutName}\" was saved for position \"{snapshot.Position}\" and cannot be loaded while you are on \"{GetPositionKey()}\".", "vatSys Window Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
+
+                // Apply strip mode up-front so any strip windows created later use the correct type.
+                ApplyStripMode(snapshot.StripMode ?? InferStripMode(snapshot));
+
                 CloseWindowsNotInSnapshot(snapshot);
                 ApplyAsdState(snapshot.Asd);
                 ApplyControlledSectors(snapshot.ControlledSectors);
 
                 if (snapshot.Windows == null || snapshot.Windows.Count == 0) return;
 
+                var restoredIndices = new HashSet<int>();
+
                 // Restore windows
-                foreach (var entry in snapshot.Windows)
+                for (var i = 0; i < snapshot.Windows.Count; i++)
                 {
-                    TryRestoreWindow(entry);
+                    var window = TryRestoreWindow(snapshot.Windows[i]);
+                    if (window != null)
+                    {
+                        restoredIndices.Add(i);
+                    }
                 }
+
+                RestoreUnmatchedVatSysWindows(snapshot, restoredIndices);
+
+                // Run arrival restore asynchronously so we don't block the UI thread.
+                var arrivalIndices = new HashSet<int>(restoredIndices);
+                Task.Run(() => EnsureArrivalWindows(snapshot, arrivalIndices));
+
+                EnsureStateStripWindows(snapshot);
+                CloseExtraStripWindows(snapshot);
 
                 // Reapply special placements after everything is up to ensure late-opening windows are aligned.
                 EnforceSpecialPlacements(snapshot);
@@ -373,13 +553,20 @@ namespace vatSysWindowManager
             {
                 System.Diagnostics.Debug.WriteLine($"WindowManager: restore failed from file {path}: {ex}");
             }
+            finally
+            {
+                isRestoringLayout = false;
+                windowsUsedDuringRestore.Clear();
+            }
         }
 
         private WindowLayoutEntry BuildEntry(Form form)
         {
             try
             {
-                if (form == null || form.IsDisposed || !form.Visible) return null;
+                if (form == null || form.IsDisposed) return null;
+                var isArrival = IsArrivalWindow(form);
+                if (!form.Visible && !isArrival) return null;
 
                 var placement = User32.GetWindowPlacement(form.Handle);
             var entry = new WindowLayoutEntry
@@ -462,8 +649,12 @@ namespace vatSysWindowManager
             }
             else if (typeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
             {
+                meta["SavedTitle"] = form.Text;
+
                 var airport = GetPropertyString(form, "Airport");
                 if (!string.IsNullOrWhiteSpace(airport)) meta["Airport"] = airport.Trim();
+                var hint = ParseAirportFromText(form.Text);
+                if (!string.IsNullOrWhiteSpace(hint)) meta["AirportHint"] = hint;
             }
             else if (typeName.EndsWith("StripWindow", StringComparison.Ordinal))
             {
@@ -540,6 +731,24 @@ namespace vatSysWindowManager
             return field?.GetValue(instance);
         }
 
+        private void TrySetPropertyString(object instance, string propertyName, string value)
+        {
+            if (instance == null || string.IsNullOrWhiteSpace(propertyName)) return;
+
+            try
+            {
+                var prop = instance.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (prop != null && prop.CanWrite)
+                {
+                    prop.SetValue(instance, value);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
         private string GetPropertyString(object instance, string propertyName)
         {
             var prop = instance.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -549,6 +758,12 @@ namespace vatSysWindowManager
 
         private Form TryRestoreWindow(WindowLayoutEntry entry)
         {
+            if (entry?.TypeName != null && entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
+            {
+                // Arrival windows are handled in a dedicated pass to avoid duplicates.
+                return null;
+            }
+
             var placement = entry.Placement?.ToWindowPlacement();
             if (placement != null)
             {
@@ -567,70 +782,634 @@ namespace vatSysWindowManager
                 }
             }
 
-            if (window != null && placement != null)
-            {
-                ApplyPlacement(window, placement.Value, entry.Metadata);
-                if (IsOzStrips(entry))
-                {
-                    EnsureOzStripsPlacement(window, placement.Value, entry.Metadata);
-                }
-            }
-            else if (IsOzStrips(entry))
+            if (window == null && IsOzStrips(entry))
             {
                 // If OzStrips opens slightly later, watch for it and apply placement once available.
                 EnsureOzStripsPlacementWhenAvailable(entry);
             }
 
-            if (window != null)
+            if (window == null) return null;
+
+            FinalizeRestoredWindow(window, entry, placement);
+            return window;
+        }
+
+        private void RestoreUnmatchedVatSysWindows(LayoutSnapshot snapshot, HashSet<int> restoredIndices)
+        {
+            if (snapshot?.Windows == null || snapshot.Windows.Count == 0) return;
+
+            var restored = restoredIndices ?? new HashSet<int>();
+
+            for (var i = 0; i < snapshot.Windows.Count; i++)
             {
-                entry.Metadata.TryGetValue("AsdType", out var asdType);
-
-                var displayName = entry.Metadata.TryGetValue("DisplayPosition", out var displayPosition) ? displayPosition : null;
-                var displayCallsign = entry.Metadata.TryGetValue("DisplayPositionCallsign", out var displayCallsignMeta) ? displayCallsignMeta : null;
-                var displayFull = entry.Metadata.TryGetValue("DisplayPositionFullName", out var displayFullMeta) ? displayFullMeta : null;
-                ApplyDisplayPosition(window, displayName, displayCallsign, displayFull, asdType);
-
-                if (entry.Metadata.TryGetValue("CentreLat", out var centreLat) &&
-                    entry.Metadata.TryGetValue("CentreLon", out var centreLon))
+                if (restored.Contains(i)) continue;
+                var entry = snapshot.Windows[i];
+                if (entry == null) continue;
+                if (entry.TypeName != null && entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
                 {
-                    ApplyCentre(window, centreLat, centreLon, asdType);
+                    // Arrival windows are handled in a dedicated pass.
+                    continue;
                 }
 
-                if (entry.Metadata.TryGetValue("Range", out var range))
+                // Only broaden for vatsys forms to avoid surprising third-party plugins.
+                if (string.IsNullOrWhiteSpace(entry.TypeName) ||
+                    !entry.TypeName.StartsWith("vatsys.", StringComparison.OrdinalIgnoreCase))
                 {
-                    ApplyRange(window, range, asdType);
+                    continue;
                 }
 
-                if (entry.Metadata.TryGetValue("Maps", out var maps))
+                var placement = entry.Placement?.ToWindowPlacement();
+                if (placement != null)
                 {
-                    ApplyCheckedMaps(window, maps);
+                    SetBaseFormPlacement(entry.FormName, placement.Value);
                 }
 
-                BringToFrontSafe(window);
-                if (!IsMainVatSysForm(window))
+                var window = FindBroadExisting(entry) ??
+                             CreateWindow(entry) ??
+                             TryCreateWithFallback(entry);
+
+                if (window != null)
                 {
-                    EnsureZOrder(window);
+                    FinalizeRestoredWindow(window, entry, placement);
+                }
+                else if (IsOzStrips(entry))
+                {
+                    EnsureOzStripsPlacementWhenAvailable(entry);
+                }
+            }
+        }
+
+        private void EnsureArrivalWindows(LayoutSnapshot snapshot, HashSet<int> restoredIndices)
+        {
+            if (snapshot?.Windows == null || snapshot.Windows.Count == 0) return;
+
+            var created = new HashSet<Form>();
+            lastArrivalSnapshot = snapshot;
+            lastArrivalDesired = created;
+
+            var targets = snapshot.Windows
+                .Select((entry, index) => new { entry, index })
+                .Where(x => x.entry != null && !string.IsNullOrWhiteSpace(x.entry.TypeName) && x.entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
+                .ToList();
+            if (targets.Count == 0) return;
+            SafeLogArrival($"EnsureArrivalWindows target count={targets.Count}");
+
+            try
+            {
+                RunOnUiThread(() =>
+                {
+                    try { MMI.CloseArrivalListWindows(); } catch { }
+                });
+
+                // Pre-fire menu requests for all targets to avoid sequential waits.
+                var preFireAirports = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var item in targets)
+                {
+                    var entry = item.entry;
+                    var metadata = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (TryGetAirportCandidates(entry, metadata, out var airports) && airports.Count > 0)
+                    {
+                        var ap = airports[0];
+                        if (!string.IsNullOrWhiteSpace(ap) && preFireAirports.Add(ap))
+                        {
+                            SafeLogArrival($"Pre-fire arrival menu for {ap}");
+                            FireArrivalMenu(ap);
+                        }
+                    }
+                }
+
+                foreach (var item in targets)
+                {
+                    var entry = item.entry;
+                    if (restoredIndices != null && restoredIndices.Contains(item.index)) continue;
+
+                    var placement = entry.Placement?.ToWindowPlacement();
+                    var metadata = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    if (!TryGetAirportCandidates(entry, metadata, out var airports) || airports.Count == 0)
+                    {
+                        airports = new List<string> { string.Empty };
+                    }
+
+                    SafeLogArrival($"Arrival restore target airports: {string.Join(",", airports)}");
+                    // Reuse any already-open arrival window first to avoid duplicates.
+                    var window = FindArrivalMatch(entry.TypeName, airports, created);
+                    if (window == null)
+                    {
+                        window = CreateArrivalQuick(entry.TypeName, airports, metadata, created);
+                    }
+
+                    if (window != null)
+                    {
+                        FinalizeRestoredWindow(window, entry, placement);
+                        created.Add(window);
+                    }
+                    else
+                    {
+                        SafeLogArrival($"Arrival creation failed for {string.Join(",", airports)}");
+                    }
+                }
+
+                CloseExtraArrivalWindows(snapshot, created);
+            }
+            catch (Exception ex)
+            {
+                SafeLogArrival($"EnsureArrivalWindows exception: {ex}");
+                // Attempt cleanup even if something failed.
+                try { CloseExtraArrivalWindows(snapshot, created); } catch { }
+            }
+
+            // Schedule a few follow-up cleanups to catch any late-spawned arrivals.
+            ScheduleArrivalCleanup(snapshot, created, 0, 700, 2000, 4000, 8000, 12000);
+        }
+
+        private void ScheduleArrivalCleanup(LayoutSnapshot snapshot, HashSet<Form> desired, params int[] delays)
+        {
+            if (delays == null || delays.Length == 0) return;
+
+            foreach (var delay in delays)
+            {
+                Task.Run(async () =>
+                {
+                    if (delay > 0) await Task.Delay(delay);
+                    RunOnUiThread(() =>
+                    {
+                        SafeLogArrival($"Running arrival cleanup delay={delay}ms");
+                        try { CloseExtraArrivalWindows(snapshot, desired); } catch { }
+                    });
+                });
+            }
+        }
+
+        private Form FindArrivalMatch(string typeName, List<string> airports, HashSet<Form> assigned)
+        {
+            var airportSet = airports?.Select(a => a?.Trim().ToUpperInvariant()).Where(a => !string.IsNullOrWhiteSpace(a)).ToList() ?? new List<string>();
+
+            foreach (Form form in Application.OpenForms)
+            {
+                if (form == null || form.IsDisposed) continue;
+                if (assigned != null && assigned.Contains(form)) continue;
+                if (!string.Equals(form.GetType().FullName, typeName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (airportSet.Count == 0) return form;
+
+                var airportProp = GetPropertyString(form, "Airport");
+                var parsedTitle = ParseAirportFromText(form.Text);
+
+                foreach (var airport in airportSet)
+                {
+                    if (string.Equals(airportProp, airport, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(parsedTitle, airport, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(form.Text) && form.Text.IndexOf(airport, StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        return form;
+                    }
                 }
             }
 
-            return window;
+            return null;
+        }
+
+        private Form CreateArrivalViaMenu(string typeName, string airport, Dictionary<string, string> metadata, int attempts = 5, int delayMs = 120)
+        {
+            Form found = null;
+            var targetAirport = airport ?? string.Empty;
+
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    // Try the built-in helper first.
+                    MMI.OpenArrivalListWindow(targetAirport);
+
+                    // Also simulate the menu field typing + enter to mirror user action.
+                    TrySimulateArrivalMenu(targetAirport);
+                }
+                catch { }
+            });
+
+            found = WaitForForm(typeName, f =>
+                (string.IsNullOrWhiteSpace(targetAirport) ||
+                 string.Equals(GetPropertyString(f, "Airport"), targetAirport, StringComparison.OrdinalIgnoreCase) ||
+                 (!string.IsNullOrWhiteSpace(f.Text) && f.Text.IndexOf(targetAirport, StringComparison.OrdinalIgnoreCase) >= 0)),
+                attempts, delayMs);
+
+            if (found != null)
+            {
+                if (!string.IsNullOrWhiteSpace(targetAirport))
+                {
+                    TrySetPropertyString(found, "Airport", targetAirport);
+                }
+
+                if (metadata != null && metadata.TryGetValue("SavedTitle", out var savedTitle) && !string.IsNullOrWhiteSpace(savedTitle))
+                {
+                    found.Text = savedTitle;
+                }
+            }
+
+            return found;
+        }
+
+        private void TrySimulateArrivalMenu(string airport)
+        {
+            try
+            {
+                var main = Application.OpenForms.Cast<Form>()
+                    .FirstOrDefault(f => string.Equals(f.Name, "MainForm", StringComparison.OrdinalIgnoreCase) ||
+                                         string.Equals(f.GetType().FullName, "vatsys.MainForm", StringComparison.OrdinalIgnoreCase));
+                if (main == null) return;
+
+                var windowsMenuField = main.GetType().GetField("windowsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var windowsMenu = windowsMenuField?.GetValue(main) as ToolStripMenuItem;
+                if (windowsMenu == null) return;
+
+                windowsMenu.ShowDropDown();
+
+                ToolStripMenuItem arrivalItem = null;
+                foreach (ToolStripMenuItem item in windowsMenu.DropDownItems.OfType<ToolStripMenuItem>())
+                {
+                    var text = item.Text?.Replace("&", string.Empty).Trim();
+                    if (string.Equals(text, "Arrival List", StringComparison.OrdinalIgnoreCase))
+                    {
+                        arrivalItem = item;
+                        break;
+                    }
+                }
+                if (arrivalItem == null) return;
+                arrivalItem.ShowDropDown();
+
+                ToolStripMenuItem openNew = null;
+                foreach (ToolStripMenuItem item in arrivalItem.DropDownItems.OfType<ToolStripMenuItem>())
+                {
+                    var text = item.Text?.Replace("&", string.Empty).Trim();
+                    if (string.Equals(text, "Open New", StringComparison.OrdinalIgnoreCase))
+                    {
+                        openNew = item;
+                        break;
+                    }
+                }
+                if (openNew == null) return;
+                openNew.ShowDropDown();
+
+                var field = main.GetType().GetField("arrivalListAirportTextField", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var control = field?.GetValue(main) as Control;
+                if (control != null)
+                {
+                    control.Text = airport ?? string.Empty;
+                    var onReturn = main.GetType().GetMethod("ArrivalListAirportTextField_OnReturn", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    onReturn?.Invoke(main, new object[] { control, EventArgs.Empty });
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private Form CreateArrivalManually(string typeName, string airport, Dictionary<string, string> metadata)
+        {
+            try
+            {
+                var type = Type.GetType(typeName) ??
+                           AppDomain.CurrentDomain.GetAssemblies()
+                               .Select(a => a.GetType(typeName, false))
+                               .FirstOrDefault(t => t != null);
+
+                if (type != null && typeof(Form).IsAssignableFrom(type))
+                {
+                    Form instance = null;
+                    var ctor = type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(string) }, null);
+                    if (ctor != null)
+                    {
+                        instance = ctor.Invoke(new object[] { airport ?? string.Empty }) as Form;
+                    }
+                    else
+                    {
+                        instance = Activator.CreateInstance(type) as Form;
+                        TrySetPropertyString(instance, "Airport", airport ?? string.Empty);
+                    }
+
+                    if (instance != null)
+                    {
+                        RunOnUiThread(() =>
+                        {
+                            instance.Show();
+                            if (metadata != null && metadata.TryGetValue("SavedTitle", out var savedTitle) && !string.IsNullOrWhiteSpace(savedTitle))
+                            {
+                                instance.Text = savedTitle;
+                            }
+                        });
+                        return instance;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return null;
+        }
+
+        private void FireArrivalMenu(string airport)
+        {
+            RunOnUiThread(() =>
+            {
+                try
+                {
+                    var target = airport ?? string.Empty;
+                    MMI.OpenArrivalListWindow(target);
+                    TrySimulateArrivalMenu(target);
+                }
+                catch { }
+            });
+        }
+
+        private Form CreateArrivalWithRetries(string typeName, List<string> airports, Dictionary<string, string> metadata, HashSet<Form> created)
+        {
+            var candidates = airports ?? new List<string>();
+            if (candidates.Count == 0) candidates.Add(string.Empty);
+
+            foreach (var airport in candidates)
+            {
+                SafeLogArrival($"Attempt menu arrival for {airport}");
+                var viaMenu = CreateArrivalViaMenu(typeName, airport, metadata);
+                if (viaMenu != null && (created == null || !created.Contains(viaMenu)))
+                {
+                    SafeLogArrival($"Menu arrival success for {airport}");
+                    return viaMenu;
+                }
+
+                SafeLogArrival($"Attempt manual arrival for {airport}");
+                var manual = CreateArrivalManually(typeName, airport, metadata);
+                if (manual != null && (created == null || !created.Contains(manual)))
+                {
+                    SafeLogArrival($"Manual arrival success for {airport}");
+                    return manual;
+                }
+            }
+
+            return null;
+        }
+
+        private Form CreateArrivalQuick(string typeName, List<string> airports, Dictionary<string, string> metadata, HashSet<Form> created)
+        {
+            var candidates = airports ?? new List<string>();
+            if (candidates.Count == 0) candidates.Add(string.Empty);
+
+            foreach (var airport in candidates)
+            {
+                SafeLogArrival($"Attempt menu arrival (waited) for {airport}");
+                var viaMenu = CreateArrivalViaMenu(typeName, airport, metadata, attempts: 20, delayMs: 180);
+                if (viaMenu != null && (created == null || !created.Contains(viaMenu)))
+                {
+                    SafeLogArrival($"Menu arrival success for {airport}");
+                    return viaMenu;
+                }
+            }
+
+            return null;
+        }
+
+        private void CloseExtraArrivalWindows(LayoutSnapshot snapshot, HashSet<Form> desired)
+        {
+            if (snapshot?.Windows == null) return;
+
+            var desiredCounts = snapshot.Windows
+                .Where(w => w != null && (w.TypeName ?? string.Empty).EndsWith("SequenceWindow", StringComparison.Ordinal))
+                .SelectMany(w =>
+                {
+                    var meta = w.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    if (TryGetAirportCandidates(w, meta, out var airports) && airports.Count > 0)
+                    {
+                        return airports.Select(a => a?.Trim().ToUpperInvariant()).Where(a => !string.IsNullOrWhiteSpace(a)).ToList();
+                    }
+                    return new List<string> { string.Empty };
+                })
+                .GroupBy(a => a ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+            var used = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            SafeLogArrival($"CloseExtraArrivalWindows desired counts: {string.Join(";", desiredCounts.Select(kv => $"{kv.Key}={kv.Value}"))}");
+
+            foreach (Form form in Application.OpenForms)
+            {
+                if (form == null || form.IsDisposed) continue;
+                if (!IsArrivalWindow(form)) continue;
+                if (desired != null && desired.Contains(form)) continue;
+
+                var airport = GetPropertyString(form, "Airport")?.Trim().ToUpperInvariant() ?? string.Empty;
+                var titleAirport = ParseAirportFromText(form.Text)?.Trim().ToUpperInvariant();
+                if (!string.IsNullOrWhiteSpace(titleAirport)) airport = titleAirport;
+
+                SafeLogArrival($"Arrival present {airport} text={form.Text}");
+
+                if (!desiredCounts.TryGetValue(airport, out var allowed))
+                {
+                    SafeLogArrival($"Closing arrival (not desired) {airport} {form.Text}");
+                    try { form.Close(); } catch { }
+                    continue;
+                }
+
+                if (!used.ContainsKey(airport)) used[airport] = 0;
+                used[airport]++;
+
+                if (used[airport] > allowed)
+                {
+                    SafeLogArrival($"Closing extra arrival {airport} {form.Text} allowed={allowed}");
+                    try { form.Close(); } catch { }
+                }
+            }
+        }
+
+        private void TryCleanupArrivalsFromEvent()
+        {
+            try
+            {
+                if (lastArrivalSnapshot == null) return;
+                CloseExtraArrivalWindows(lastArrivalSnapshot, lastArrivalDesired);
+            }
+            catch (Exception ex)
+            {
+                SafeLogArrival($"TryCleanupArrivalsFromEvent error: {ex}");
+            }
+        }
+
+        private void CloseExtraStripWindows(LayoutSnapshot snapshot)
+        {
+            if (snapshot?.Windows == null) return;
+
+            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in snapshot.Windows)
+            {
+                if (entry == null) continue;
+                if ((entry.TypeName ?? string.Empty).EndsWith("StripWindow", StringComparison.Ordinal))
+                {
+                    var meta = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var type = meta.TryGetValue("StripWindowType", out var t) ? t : string.Empty;
+                    var hmi = meta.TryGetValue("HMIState", out var h) ? h : string.Empty;
+                    var beacon = meta.TryGetValue("Beacon", out var b) ? b : string.Empty;
+                    allowed.Add(BuildStripKey(type, hmi, beacon));
+                }
+            }
+
+            // If we're saving state strips, prefer to close any beacon/ADEP extras outright.
+            var savedStripMode = snapshot.StripMode ?? InferStripMode(snapshot);
+
+            foreach (Form form in Application.OpenForms)
+            {
+                if (form == null || form.IsDisposed) continue;
+                if ((form.GetType().FullName ?? string.Empty).IndexOf("StripWindow", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                if (IsOzStrips(form)) continue;
+
+                var type = GetEnumField(form, "WindowType")?.ToString() ?? string.Empty;
+                var hmi = GetEnumField(form, "State")?.ToString() ?? string.Empty;
+                var beacon = GetStringField(form, "Beacon") ?? string.Empty;
+                var key = BuildStripKey(type, hmi, beacon);
+
+                var isBeaconMode = string.Equals(type, "Beacon", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(savedStripMode, "Beacon", StringComparison.OrdinalIgnoreCase);
+
+                if (!allowed.Contains(key) || (string.Equals(savedStripMode, "State", StringComparison.OrdinalIgnoreCase) && isBeaconMode))
+                {
+                    try { form.Close(); } catch { }
+                }
+            }
+        }
+
+        private string BuildStripKey(string type, string hmi, string beacon)
+        {
+            return $"{type?.Trim()}|{hmi?.Trim()}|{beacon?.Trim()}";
+        }
+
+        private void EnsureStateStripWindows(LayoutSnapshot snapshot)
+        {
+            if (snapshot?.Windows == null) return;
+
+            var entries = snapshot.Windows
+                .Where(e => e != null && (e.TypeName ?? string.Empty).EndsWith("StripWindow", StringComparison.Ordinal))
+                .ToList();
+            if (entries.Count == 0) return;
+
+            foreach (var entry in entries)
+            {
+                var meta = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var type = meta.TryGetValue("StripWindowType", out var t) ? t : string.Empty;
+                var hmi = meta.TryGetValue("HMIState", out var h) ? h : string.Empty;
+                var beacon = meta.TryGetValue("Beacon", out var b) ? b : string.Empty;
+
+                // If already present, skip creation.
+                var existing = Application.OpenForms.Cast<Form>()
+                    .FirstOrDefault(f =>
+                        f != null && !f.IsDisposed &&
+                        (f.GetType().FullName ?? string.Empty).IndexOf("StripWindow", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        string.Equals(GetEnumField(f, "WindowType")?.ToString(), type, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(GetEnumField(f, "State")?.ToString(), hmi, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(GetStringField(f, "Beacon") ?? string.Empty, beacon ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+
+                if (existing != null)
+                {
+                    FinalizeRestoredWindow(existing, entry, entry.Placement?.ToWindowPlacement());
+                    continue;
+                }
+
+                // Create missing strip window.
+                CreateStripWindow(type, hmi, beacon);
+                var created = FindWindow("vatsys.StripWindow", f =>
+                    string.Equals(GetEnumField(f, "WindowType")?.ToString(), type, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(GetEnumField(f, "State")?.ToString(), hmi, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(GetStringField(f, "Beacon") ?? string.Empty, beacon ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+
+                if (created != null)
+                {
+                    FinalizeRestoredWindow(created, entry, entry.Placement?.ToWindowPlacement());
+                }
+            }
+        }
+
+        private void FinalizeRestoredWindow(Form window, WindowLayoutEntry entry, User32.WINDOWPLACEMENT? placement)
+        {
+            if (window == null || entry == null) return;
+
+            var metadata = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (isRestoringLayout)
+            {
+                windowsUsedDuringRestore.Add(window);
+            }
+
+            if (placement != null)
+            {
+                ApplyPlacement(window, placement.Value, metadata);
+                if (IsOzStrips(entry))
+                {
+                    EnsureOzStripsPlacement(window, placement.Value, metadata);
+                }
+            }
+            else if (IsOzStrips(entry))
+            {
+                EnsureOzStripsPlacementWhenAvailable(entry);
+            }
+
+            metadata.TryGetValue("AsdType", out var asdType);
+
+            var displayName = metadata.TryGetValue("DisplayPosition", out var displayPosition) ? displayPosition : null;
+            var displayCallsign = metadata.TryGetValue("DisplayPositionCallsign", out var displayCallsignMeta) ? displayCallsignMeta : null;
+            var displayFull = metadata.TryGetValue("DisplayPositionFullName", out var displayFullMeta) ? displayFullMeta : null;
+            ApplyDisplayPosition(window, displayName, displayCallsign, displayFull, asdType);
+
+            if (metadata.TryGetValue("CentreLat", out var centreLat) &&
+                metadata.TryGetValue("CentreLon", out var centreLon))
+            {
+                ApplyCentre(window, centreLat, centreLon, asdType);
+            }
+
+            if (metadata.TryGetValue("Range", out var range))
+            {
+                ApplyRange(window, range, asdType);
+            }
+
+            if (metadata.TryGetValue("Maps", out var maps))
+            {
+                ApplyCheckedMaps(window, maps);
+                ReapplyAsdView(window, metadata, asdType);
+            }
+
+            if (entry.TypeName.EndsWith("StripWindow", StringComparison.Ordinal))
+            {
+                ApplyStripState(window, metadata);
+            }
+
+            UpdateWindowTitleFromMetadata(window, metadata);
+
+            BringToFrontSafe(window);
+            if (!IsMainVatSysForm(window))
+            {
+                EnsureZOrder(window);
+            }
         }
 
         private Form FindExisting(WindowLayoutEntry entry)
         {
-            var forms = Application.OpenForms.Cast<Form>().ToList();
+            var forms = Application.OpenForms.Cast<Form>()
+                .Where(f => f != null && !f.IsDisposed)
+                .Where(f => !isRestoringLayout || !windowsUsedDuringRestore.Contains(f))
+                .ToList();
 
             if (IsVsCs(entry))
             {
                 var vscs = GetVsCsWindow();
-                if (vscs != null) return vscs;
+                if (vscs != null && forms.Contains(vscs)) return vscs;
             }
 
             if (IsOzStrips(entry))
             {
-                var oz = forms.FirstOrDefault(f => !f.IsDisposed && (f.Text ?? string.Empty).IndexOf("OzStrips", StringComparison.OrdinalIgnoreCase) >= 0);
+                var oz = forms.FirstOrDefault(IsOzStrips);
                 if (oz != null) return oz;
             }
+
+            var metadataMatch = FindMetadataMatch(forms, entry);
+            if (metadataMatch != null) return metadataMatch;
 
             var exact = forms.FirstOrDefault(f =>
                 string.Equals(f.GetType().FullName, entry.TypeName, StringComparison.Ordinal) &&
@@ -644,6 +1423,621 @@ namespace vatSysWindowManager
 
             var typeMatches = forms.Where(f => string.Equals(f.GetType().FullName, entry.TypeName, StringComparison.Ordinal)).ToList();
             if (typeMatches.Count == 1) return typeMatches[0];
+
+            return null;
+        }
+
+        private Form FindBroadExisting(WindowLayoutEntry entry)
+        {
+            if (entry == null) return null;
+
+            var forms = Application.OpenForms.Cast<Form>()
+                .Where(f => f != null && !f.IsDisposed)
+                .Where(f => !isRestoringLayout || !windowsUsedDuringRestore.Contains(f))
+                .ToList();
+
+            if (entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal) &&
+                entry.Metadata.TryGetValue("ATISCallsign", out var atis) &&
+                !string.IsNullOrWhiteSpace(atis))
+            {
+                var atisMatch = forms.FirstOrDefault(f =>
+                    string.Equals(f.GetType().FullName, entry.TypeName, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(GetStringField(f, "ATISCallsign"), atis, StringComparison.OrdinalIgnoreCase));
+                if (atisMatch != null) return atisMatch;
+            }
+
+            var byType = forms.FirstOrDefault(f => string.Equals(f.GetType().FullName, entry.TypeName, StringComparison.OrdinalIgnoreCase));
+            if (byType != null) return byType;
+
+            if (!string.IsNullOrWhiteSpace(entry.FormName))
+            {
+                var byName = forms.FirstOrDefault(f => string.Equals(f.Name, entry.FormName, StringComparison.OrdinalIgnoreCase));
+                if (byName != null) return byName;
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.Title))
+            {
+                var byTitle = forms.FirstOrDefault(f => string.Equals(f.Text, entry.Title, StringComparison.OrdinalIgnoreCase));
+                if (byTitle != null) return byTitle;
+            }
+
+            return null;
+        }
+
+        private IEnumerable<string> GetPrimeArrivalAirports()
+        {
+            var result = new List<string>();
+
+            try
+            {
+                var prime = MMI.PrimePosition;
+                var field = prime?.GetType().GetField("ArrivalListAirports", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (field != null)
+                {
+                    var list = field.GetValue(prime) as System.Collections.IEnumerable;
+                    if (list != null)
+                    {
+                        foreach (var item in list)
+                        {
+                            var s = item as string ?? item?.ToString();
+                            if (!string.IsNullOrWhiteSpace(s)) result.Add(s.Trim().ToUpperInvariant());
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return result;
+        }
+
+        private Form RestoreAtisWindow(WindowLayoutEntry entry, string atisCallsign)
+        {
+            if (string.IsNullOrWhiteSpace(atisCallsign)) return null;
+
+            string callsign = atisCallsign.Trim();
+
+            // Prefer an existing unused ATIS window with the same callsign.
+            var existing = Application.OpenForms.Cast<Form>()
+                .FirstOrDefault(f =>
+                    f != null &&
+                    !f.IsDisposed &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(f)) &&
+                    string.Equals(f.GetType().FullName, entry.TypeName, StringComparison.Ordinal) &&
+                    string.Equals(GetStringField(f, "ATISCallsign"), callsign, StringComparison.OrdinalIgnoreCase));
+            if (existing != null)
+            {
+                TrackPluginWindow(existing);
+                return existing;
+            }
+
+            // Try the built-in launcher.
+            MMI.OpenATISWindow(callsign);
+
+            var found = WaitForForm(entry.TypeName, f =>
+                string.Equals(GetStringField(f, "ATISCallsign"), callsign, StringComparison.OrdinalIgnoreCase) &&
+                (!isRestoringLayout || !windowsUsedDuringRestore.Contains(f)), 5, 180);
+            if (found != null)
+            {
+                TrackPluginWindow(found);
+                return found;
+            }
+
+            // If vatsys reuses a single ATIS window per callsign, create one manually to allow multiple instances.
+            var type = Type.GetType(entry.TypeName) ??
+                       AppDomain.CurrentDomain.GetAssemblies()
+                           .Select(a => a.GetType(entry.TypeName, false))
+                           .FirstOrDefault(t => t != null);
+
+            if (type != null && typeof(Form).IsAssignableFrom(type))
+            {
+                try
+                {
+                    var instance = Activator.CreateInstance(type) as Form;
+                    if (instance != null)
+                    {
+                        try
+                        {
+                            var field = type.GetField("ATISCallsign", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                            field?.SetValue(instance, callsign);
+                        }
+                        catch { }
+
+                        instance.Show();
+                        TrackPluginWindow(instance);
+                        return instance;
+                    }
+                }
+                catch
+                {
+                    // ignore and fall through
+                }
+            }
+
+            return null;
+        }
+
+        private void ReapplyAsdView(Form form, Dictionary<string, string> metadata, string asdType)
+        {
+            if (form == null || metadata == null) return;
+
+            // Some map toggles reset view; reapply after a short delay.
+            if (!metadata.TryGetValue("CentreLat", out var lat) || !metadata.TryGetValue("CentreLon", out var lon))
+            {
+                lat = null;
+                lon = null;
+            }
+            metadata.TryGetValue("Range", out var range);
+
+            var display = metadata.TryGetValue("DisplayPosition", out var disp) ? disp : null;
+            var dispCallsign = metadata.TryGetValue("DisplayPositionCallsign", out var dispC) ? dispC : null;
+            var dispFull = metadata.TryGetValue("DisplayPositionFullName", out var dispF) ? dispF : null;
+
+            Task.Run(async () =>
+            {
+                await Task.Delay(200);
+                RunOnUiThread(() =>
+                {
+                    if (form == null || form.IsDisposed) return;
+                    ApplyDisplayPosition(form, display, dispCallsign, dispFull, asdType, remainingRetries: 1);
+                    if (!string.IsNullOrWhiteSpace(lat) && !string.IsNullOrWhiteSpace(lon))
+                    {
+                        ApplyCentre(form, lat, lon, asdType, remainingRetries: 1);
+                    }
+                    if (!string.IsNullOrWhiteSpace(range))
+                    {
+                        ApplyRange(form, range, asdType, remainingRetries: 1);
+                    }
+                });
+            });
+        }
+
+        private void UpdateWindowTitleFromMetadata(Form form, Dictionary<string, string> metadata)
+        {
+            if (form == null || metadata == null) return;
+
+            var typeName = form.GetType().FullName ?? string.Empty;
+            var asd = GetAsdControl(form);
+
+            if (asd != null)
+            {
+                var displayName = metadata.TryGetValue("DisplayPositionFullName", out var full) && !string.IsNullOrWhiteSpace(full)
+                    ? full
+                    : metadata.TryGetValue("DisplayPosition", out var name) ? name : null;
+
+                if (!string.IsNullOrWhiteSpace(displayName))
+                {
+                    var baseTitle = form.Text;
+                    var parts = baseTitle?.Split('-').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p)).ToList() ?? new List<string>();
+                    if (parts.Count > 0)
+                    {
+                        parts[parts.Count - 1] = displayName;
+                        form.Text = string.Join(" - ", parts);
+                    }
+                    else
+                    {
+                        form.Text = displayName;
+                    }
+                }
+                return;
+            }
+
+            if (typeName.EndsWith("ATISWindow", StringComparison.Ordinal))
+            {
+                if (metadata.TryGetValue("ATISCallsign", out var atis) && !string.IsNullOrWhiteSpace(atis))
+                {
+                    form.Text = $"ATIS - {atis}";
+                }
+                return;
+            }
+
+            if (typeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
+            {
+                if (metadata.TryGetValue("SavedTitle", out var savedTitle) && !string.IsNullOrWhiteSpace(savedTitle))
+                {
+                    form.Text = savedTitle;
+                    return;
+                }
+
+                if (metadata.TryGetValue("Airport", out var airport) && !string.IsNullOrWhiteSpace(airport))
+                {
+                    form.Text = $"A: {airport} List";
+                }
+            }
+        }
+
+        private Form RestoreArrivalWindow(WindowLayoutEntry entry, List<string> airports)
+        {
+            var typeName = entry?.TypeName;
+            if (string.IsNullOrWhiteSpace(typeName)) return null;
+
+            var candidates = airports?.Count > 0 ? airports : new List<string>();
+            if (candidates.Count == 0)
+            {
+                candidates.AddRange(GetPrimeArrivalAirports());
+            }
+
+            // If nothing captured, still try one attempt with empty airport which opens the last/default arrival list.
+            if (candidates.Count == 0) candidates.Add(string.Empty);
+
+            candidates = candidates
+                .Select(a => a == null ? string.Empty : a.Trim().ToUpperInvariant())
+                .Where(a => a != null)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // Try to reuse an unused arrival window that matches any of the airports.
+            foreach (var airport in candidates)
+            {
+                var existing = Application.OpenForms.Cast<Form>()
+                    .FirstOrDefault(f =>
+                        f != null &&
+                        !f.IsDisposed &&
+                        (!isRestoringLayout || !windowsUsedDuringRestore.Contains(f)) &&
+                        string.Equals(f.GetType().FullName, typeName, StringComparison.Ordinal) &&
+                        (string.Equals(GetPropertyString(f, "Airport"), airport, StringComparison.OrdinalIgnoreCase) ||
+                         (!string.IsNullOrWhiteSpace(airport) && !string.IsNullOrWhiteSpace(f.Text) && f.Text.IndexOf(airport, StringComparison.OrdinalIgnoreCase) >= 0)));
+                if (existing != null)
+                {
+                    TrackPluginWindow(existing);
+                    return existing;
+                }
+            }
+
+            // Launch via MMI for each airport candidate until we find a match.
+            foreach (var airport in candidates)
+            {
+                try
+                {
+                    var target = airport ?? string.Empty;
+                    RunOnUiThread(() => MMI.OpenArrivalListWindow(target));
+                }
+                catch { }
+
+                var found = WaitForForm(typeName, f =>
+                    (string.IsNullOrWhiteSpace(airport) ||
+                     string.Equals(GetPropertyString(f, "Airport"), airport, StringComparison.OrdinalIgnoreCase) ||
+                     (!string.IsNullOrWhiteSpace(f.Text) && f.Text.IndexOf(airport ?? string.Empty, StringComparison.OrdinalIgnoreCase) >= 0)) &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(f)), 14, 250);
+
+                if (found != null)
+                {
+                    // If airport property is empty but we have a target, try to set it so placement sticks.
+                    TrySetPropertyString(found, "Airport", airport);
+                    TrackPluginWindow(found);
+                    return found;
+                }
+            }
+
+            // Manual creation fallback.
+            var type = Type.GetType(typeName) ??
+                       AppDomain.CurrentDomain.GetAssemblies()
+                           .Select(a => a.GetType(typeName, false))
+                           .FirstOrDefault(t => t != null);
+
+            if (type != null && typeof(Form).IsAssignableFrom(type))
+            {
+                foreach (var airport in candidates)
+                {
+                    try
+                    {
+                        Form instance = null;
+                        // Prefer ctor(string) if available to set airport up-front.
+                        var ctor = type.GetConstructor(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(string) }, null);
+                        if (ctor != null)
+                        {
+                            instance = ctor.Invoke(new object[] { airport ?? string.Empty }) as Form;
+                        }
+                        else
+                        {
+                            instance = Activator.CreateInstance(type) as Form;
+                            TrySetPropertyString(instance, "Airport", airport);
+                        }
+
+                        if (instance != null)
+                        {
+                            instance.Show();
+                            TrackPluginWindow(instance);
+                            return instance;
+                        }
+                    }
+                    catch
+                    {
+                        // continue trying other airports
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private Form WaitForForm(string typeName, Func<Form, bool> predicate, int attempts, int delayMs)
+        {
+            for (var i = 0; i < attempts; i++)
+            {
+                var match = Application.OpenForms.Cast<Form>()
+                    .FirstOrDefault(f =>
+                        f != null &&
+                        !f.IsDisposed &&
+                        string.Equals(f.GetType().FullName, typeName, StringComparison.OrdinalIgnoreCase) &&
+                        (predicate?.Invoke(f) ?? true));
+
+                if (match != null) return match;
+                Thread.Sleep(Math.Max(10, delayMs));
+            }
+
+            return null;
+        }
+
+        private bool TryGetAirportCandidates(WindowLayoutEntry entry, Dictionary<string, string> metadata, out List<string> airports)
+        {
+            var list = new List<string>();
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void Add(string candidate)
+            {
+                if (string.IsNullOrWhiteSpace(candidate)) return;
+                var upper = candidate.Trim().ToUpperInvariant();
+                if (set.Add(upper)) list.Add(upper);
+            }
+
+            if (metadata != null)
+            {
+                if (metadata.TryGetValue("Airport", out var airport)) Add(airport);
+                if (metadata.TryGetValue("AirportHint", out var hint)) Add(hint);
+            }
+
+            Add(ParseAirportFromText(entry?.Title));
+            Add(ParseAirportFromText(entry?.FormName));
+
+            airports = list;
+            return airports.Count > 0;
+        }
+
+        private string ParseAirportFromText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return null;
+
+            var tokens = text.Split(new[] { ' ', '-', '_', ':', '(', ')' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var t in tokens)
+            {
+                var trimmed = t.Trim();
+                if (trimmed.Length >= 3 && trimmed.Length <= 5 && trimmed.All(char.IsLetter))
+                {
+                    return trimmed.ToUpperInvariant();
+                }
+            }
+
+            return null;
+        }
+
+        private Form FindMetadataMatch(IEnumerable<Form> forms, WindowLayoutEntry entry)
+        {
+            if (entry == null || string.IsNullOrWhiteSpace(entry.TypeName)) return null;
+
+            var metadata = entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var candidates = forms.Where(f => string.Equals(f.GetType().FullName, entry.TypeName, StringComparison.Ordinal)).ToList();
+            if (candidates.Count == 0) return null;
+
+            if (entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal) &&
+                TryGetAirportCandidates(entry, metadata, out var airports))
+            {
+                foreach (var airport in airports)
+                {
+                    var arrival = candidates.FirstOrDefault(f =>
+                        string.Equals(GetPropertyString(f, "Airport"), airport, StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(f.Text) && f.Text.IndexOf(airport, StringComparison.OrdinalIgnoreCase) >= 0));
+                    if (arrival != null) return arrival;
+                }
+            }
+
+            if (entry.TypeName.EndsWith("StripWindow", StringComparison.Ordinal))
+            {
+                foreach (var candidate in candidates)
+                {
+                    if (MatchesStripWindowMetadata(candidate, metadata))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+
+            if (entry.TypeName.EndsWith("ChatWindow", StringComparison.Ordinal) &&
+                metadata.TryGetValue("Recipient", out var recipient) &&
+                !string.IsNullOrWhiteSpace(recipient))
+            {
+                var chat = candidates.FirstOrDefault(f =>
+                    string.Equals(GetStringField(f, "Recipient"), recipient, StringComparison.OrdinalIgnoreCase));
+                if (chat != null) return chat;
+            }
+
+            if (entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal) &&
+                metadata.TryGetValue("ATISCallsign", out var atis) &&
+                !string.IsNullOrWhiteSpace(atis))
+            {
+                var atisWindow = candidates.FirstOrDefault(f =>
+                    string.Equals(GetStringField(f, "ATISCallsign"), atis, StringComparison.OrdinalIgnoreCase));
+                if (atisWindow != null) return atisWindow;
+            }
+
+            var asdMatch = FindAsdMatch(candidates, metadata);
+            if (asdMatch != null) return asdMatch;
+
+            return null;
+        }
+
+        private bool MatchesStripWindowMetadata(Form form, Dictionary<string, string> metadata)
+        {
+            if (form == null || metadata == null) return false;
+
+            var hasBeacon = metadata.TryGetValue("Beacon", out var beacon) && !string.IsNullOrWhiteSpace(beacon);
+            var hasType = metadata.TryGetValue("StripWindowType", out var stripType) && !string.IsNullOrWhiteSpace(stripType);
+            var hasHmi = metadata.TryGetValue("HMIState", out var hmiState) && !string.IsNullOrWhiteSpace(hmiState);
+
+            if (!hasBeacon && !hasType && !hasHmi) return false;
+
+            if (hasBeacon)
+            {
+                var actualBeacon = GetStringField(form, "Beacon");
+                if (!string.Equals(actualBeacon, beacon, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+
+            if (hasType)
+            {
+                var actualType = GetEnumField(form, "WindowType")?.ToString();
+                if (!string.Equals(actualType, stripType, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+
+            if (hasHmi)
+            {
+                var actualHmi = GetEnumField(form, "State")?.ToString();
+                if (!string.Equals(actualHmi, hmiState, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+
+            return true;
+        }
+
+        private Form FindAsdMatch(IEnumerable<Form> candidates, Dictionary<string, string> metadata)
+        {
+            if (metadata == null) return null;
+
+            var hasDisplay = metadata.TryGetValue("DisplayPosition", out var display) && !string.IsNullOrWhiteSpace(display);
+            var hasCallsign = metadata.TryGetValue("DisplayPositionCallsign", out var displayCallsign) && !string.IsNullOrWhiteSpace(displayCallsign);
+            var hasFull = metadata.TryGetValue("DisplayPositionFullName", out var displayFullName) && !string.IsNullOrWhiteSpace(displayFullName);
+            var hasAsdType = metadata.TryGetValue("AsdType", out var expectedAsdType) && !string.IsNullOrWhiteSpace(expectedAsdType);
+
+            if (!hasDisplay && !hasCallsign && !hasFull && !hasAsdType) return null;
+
+            foreach (var form in candidates)
+            {
+                var asd = GetAsdControl(form);
+                if (asd == null) continue;
+
+                var info = GetDisplayPositionInfo(asd);
+
+                if (hasDisplay && !string.Equals(info?.Name, display, StringComparison.OrdinalIgnoreCase)) continue;
+                if (hasCallsign && !string.Equals(info?.Callsign, displayCallsign, StringComparison.OrdinalIgnoreCase)) continue;
+                if (hasFull && !string.Equals(info?.FullName, displayFullName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (hasAsdType)
+                {
+                    var actualAsdType = GetAsdType(asd);
+                    if (!string.Equals(actualAsdType, expectedAsdType, StringComparison.OrdinalIgnoreCase)) continue;
+                }
+
+                return form;
+            }
+
+            return null;
+        }
+
+        private Form TryCreateWithFallback(WindowLayoutEntry entry)
+        {
+            try
+            {
+                var type = Type.GetType(entry.TypeName) ??
+                           AppDomain.CurrentDomain.GetAssemblies()
+                               .Select(a => a.GetType(entry.TypeName, false))
+                               .FirstOrDefault(t => t != null);
+
+                if (type == null || !typeof(Form).IsAssignableFrom(type)) return null;
+
+                var ctor = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .OrderBy(c => c.GetParameters().Length)
+                    .FirstOrDefault();
+
+                if (ctor == null) return null;
+
+                var args = BuildFallbackArgs(ctor.GetParameters(), entry);
+                var instance = ctor.Invoke(args) as Form;
+                instance?.Show();
+                if (instance != null)
+                {
+                    TrackPluginWindow(instance);
+                    return instance;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"WindowManager: fallback create failed for {entry?.TypeName}: {ex}");
+            }
+
+            return null;
+        }
+
+        private object[] BuildFallbackArgs(ParameterInfo[] parameters, WindowLayoutEntry entry)
+        {
+            var metadata = entry?.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var args = new object[parameters?.Length ?? 0];
+
+            for (var i = 0; i < args.Length; i++)
+            {
+                args[i] = BuildFallbackArg(parameters[i], entry, metadata);
+            }
+
+            return args;
+        }
+
+        private object BuildFallbackArg(ParameterInfo parameter, WindowLayoutEntry entry, Dictionary<string, string> metadata)
+        {
+            if (parameter == null) return null;
+
+            var type = parameter.ParameterType;
+
+            if (type == typeof(string))
+            {
+                var candidates = new[]
+                {
+                    metadata.TryGetValue("Beacon", out var beacon) ? beacon : null,
+                    metadata.TryGetValue("Airport", out var airport) ? airport : null,
+                    metadata.TryGetValue("ATISCallsign", out var atis) ? atis : null,
+                    metadata.TryGetValue("Recipient", out var recipient) ? recipient : null,
+                    !string.IsNullOrWhiteSpace(entry?.Title) ? entry.Title : null,
+                    !string.IsNullOrWhiteSpace(entry?.FormName) ? entry.FormName : null
+                };
+
+                var value = candidates.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c));
+                return value ?? string.Empty;
+            }
+
+            if (type.IsEnum)
+            {
+                var enumValue = TryGetEnumFromMetadata(type, metadata);
+                if (enumValue != null) return enumValue;
+
+                var values = Enum.GetValues(type);
+                if (values.Length > 0) return values.GetValue(0);
+                return Activator.CreateInstance(type);
+            }
+
+            if (parameter.HasDefaultValue) return parameter.DefaultValue;
+            if (type.IsValueType) return Activator.CreateInstance(type);
+            return null;
+        }
+
+        private object TryGetEnumFromMetadata(Type enumType, Dictionary<string, string> metadata)
+        {
+            if (enumType == null || metadata == null || !enumType.IsEnum) return null;
+
+            foreach (var kv in metadata)
+            {
+                if (string.IsNullOrWhiteSpace(kv.Value)) continue;
+
+                try
+                {
+                    var parsed = Enum.Parse(enumType, kv.Value, true);
+                    if (Enum.IsDefined(enumType, parsed))
+                    {
+                        return parsed;
+                    }
+                }
+                catch
+                {
+                    // ignore and keep trying
+                }
+            }
 
             return null;
         }
@@ -738,19 +2132,21 @@ namespace vatSysWindowManager
                 if (entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal) &&
                     entry.Metadata.TryGetValue("ATISCallsign", out var atis))
                 {
-                    MMI.OpenATISWindow(atis);
-                    var w = FindWindow(entry.TypeName, f => string.Equals(GetStringField(f, "ATISCallsign"), atis, StringComparison.OrdinalIgnoreCase));
-                    if (w != null) TrackPluginWindow(w);
-                    return w;
+                    var w = RestoreAtisWindow(entry, atis);
+                    if (w != null) return w;
                 }
 
-                if (entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal) &&
-                    entry.Metadata.TryGetValue("Airport", out var airport))
+                if (entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
                 {
-                    MMI.OpenArrivalListWindow(airport);
-                    var w = FindWindow(entry.TypeName, f => string.Equals(GetPropertyString(f, "Airport"), airport, StringComparison.OrdinalIgnoreCase));
-                    if (w != null) TrackPluginWindow(w);
-                    return w;
+                    if (TryGetAirportCandidates(entry, entry.Metadata ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), out var airports))
+                    {
+                        var w = RestoreArrivalWindow(entry, airports);
+                        if (w != null) return w;
+                    }
+
+                    // Fallback: try without an airport to let vatsys pick the default.
+                    var fallbackArrival = RestoreArrivalWindow(entry, new List<string>());
+                    if (fallbackArrival != null) return fallbackArrival;
                 }
 
                 if (entry.TypeName.EndsWith("StripWindow", StringComparison.Ordinal) &&
@@ -934,7 +2330,10 @@ namespace vatSysWindowManager
             if (!string.IsNullOrWhiteSpace(entry.Title))
             {
                 var firstToken = entry.Title.Split(new[] { ':', '-', ' ' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-                Add(firstToken);
+                if (!(string.Equals(firstToken, "A", StringComparison.OrdinalIgnoreCase) && !entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal)))
+                {
+                    Add(firstToken);
+                }
             }
             Add(entry.FormName);
             if (!string.IsNullOrWhiteSpace(entry.TypeName))
@@ -943,6 +2342,12 @@ namespace vatSysWindowManager
             }
             Add("VSCS"); // ensure VSCS menu text is considered
             if (IsOzStrips(entry)) Add("OzStrips");
+
+            // Avoid using arrival-style titles for strip windows to prevent accidental arrival list opens.
+            if (entry.TypeName.EndsWith("StripWindow", StringComparison.Ordinal))
+            {
+                list = list.Where(s => !(s?.StartsWith("A:", StringComparison.OrdinalIgnoreCase) ?? false)).ToList();
+            }
 
             return list.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.OrdinalIgnoreCase);
         }
@@ -1469,6 +2874,12 @@ namespace vatSysWindowManager
             }
         }
 
+        private bool IsArrivalWindow(Form form)
+        {
+            var typeName = form?.GetType().FullName ?? string.Empty;
+            return typeName.EndsWith("SequenceWindow", StringComparison.Ordinal);
+        }
+
         private void TrackPluginWindow(Form form)
         {
             if (form == null) return;
@@ -1491,6 +2902,16 @@ namespace vatSysWindowManager
                 catch { }
             }
             pluginWindows.Clear();
+        }
+
+        private void SafeLogArrival(string message)
+        {
+            // Debug logging disabled for release to avoid creating extra files.
+        }
+
+        private void DumpArrivalWindows(string reason)
+        {
+            // Debug logging disabled for release.
         }
 
         private void CloseNonDefaultOnPositionChange()
@@ -1882,6 +3303,121 @@ namespace vatSysWindowManager
             return item.Text;
         }
 
+        private void EnsureMapMenuBuilt(Form form, ToolStripMenuItem menu)
+        {
+            if (form == null || menu == null) return;
+
+            try
+            {
+                var dropDownOpened = form.GetType().GetMethod("mapsToolStripMenuItem_DropDownOpened", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                dropDownOpened?.Invoke(form, new object[] { menu, EventArgs.Empty });
+            }
+            catch
+            {
+                // best effort
+            }
+        }
+
+        private void ForceAsdRender(Control asdControl)
+        {
+            if (asdControl == null) return;
+
+            try
+            {
+                var render = asdControl.GetType().GetMethod("Render", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                if (render != null)
+                {
+                    render.Invoke(asdControl, null);
+                    return;
+                }
+            }
+            catch
+            {
+                // ignore and fall back
+            }
+
+            try
+            {
+                asdControl.Invalidate(true);
+                asdControl.Update();
+            }
+            catch { }
+        }
+
+        private void ScheduleMapRefresh(Control asdControl)
+        {
+            if (asdControl == null) return;
+
+            void Refresh()
+            {
+                try
+                {
+                    asdControl.Invalidate(true);
+                    asdControl.Update();
+                }
+                catch { }
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(180);
+                    RunOnUiThread(Refresh);
+                    await Task.Delay(250);
+                    RunOnUiThread(Refresh);
+                }
+                catch { }
+            });
+        }
+
+        private void EnsureMapVisibility(Control asdControl, ToolStripMenuItem item, bool shouldBeVisible)
+        {
+            if (asdControl == null || item == null) return;
+
+            try
+            {
+                var map = item.Tag;
+                if (map == null) return;
+
+                var setMapVisible = asdControl.GetType().GetMethod("SetMapVisible", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                setMapVisible?.Invoke(asdControl, new object[] { map, shouldBeVisible });
+            }
+            catch
+            {
+                // ignore and rely on the normal menu handlers
+            }
+        }
+
+        private void ApplyStripState(Form form, Dictionary<string, string> metadata)
+        {
+            if (form == null || metadata == null) return;
+            if (!metadata.TryGetValue("HMIState", out var hmiState) || string.IsNullOrWhiteSpace(hmiState)) return;
+
+            try
+            {
+                var enumType = typeof(MMI).Assembly.GetType("vatsys.MMI+HMIStates");
+                if (enumType == null || !enumType.IsEnum) return;
+
+                var parsed = Enum.Parse(enumType, hmiState, true);
+
+                var field = form.GetType().GetField("State", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                field?.SetValue(form, parsed);
+
+                var prop = form.GetType().GetProperty("State", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (prop != null && prop.CanWrite)
+                {
+                    prop.SetValue(form, parsed);
+                }
+
+                form.Invalidate();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
         private void ApplyCheckedMaps(Form form, string mapsValue)
         {
             if (string.IsNullOrWhiteSpace(mapsValue)) return;
@@ -1891,11 +3427,36 @@ namespace vatSysWindowManager
 
             try
             {
+                var asd = GetAsdControl(form);
                 var menuField = form.GetType().GetField("mapsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                 var menu = menuField?.GetValue(form) as ToolStripMenuItem;
                 if (menu == null) return;
 
-                ApplyMapState(menu.DropDownItems, desired);
+                RunOnUiThread(() =>
+                {
+                    try
+                    {
+                        EnsureMapMenuBuilt(form, menu);
+                        ApplyMapState(asd, menu.DropDownItems, desired, enforceVisibility: true);
+                        asd?.Invalidate(true);
+                        ScheduleMapRefresh(asd);
+
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(320);
+                            RunOnUiThread(() =>
+                            {
+                                try
+                                {
+                                    ApplyMapState(asd, menu.DropDownItems, desired, enforceVisibility: true);
+                                    ScheduleMapRefresh(asd);
+                                }
+                                catch { }
+                            });
+                        });
+                    }
+                    catch { }
+                });
             }
             catch (Exception ex)
             {
@@ -1903,7 +3464,7 @@ namespace vatSysWindowManager
             }
         }
 
-        private void ApplyMapState(ToolStripItemCollection items, HashSet<string> desired)
+        private void ApplyMapState(Control asdControl, ToolStripItemCollection items, HashSet<string> desired, bool enforceVisibility)
         {
             foreach (ToolStripItem item in items)
             {
@@ -1911,14 +3472,19 @@ namespace vatSysWindowManager
                 {
                     var key = GetMenuItemKey(mi);
                     var shouldBeChecked = !string.IsNullOrWhiteSpace(key) && desired.Contains(key);
+
                     if (mi.Checked != shouldBeChecked)
                     {
                         mi.PerformClick();
                     }
+                    else if (enforceVisibility)
+                    {
+                        EnsureMapVisibility(asdControl, mi, shouldBeChecked);
+                    }
 
                     if (mi.HasDropDownItems)
                     {
-                        ApplyMapState(mi.DropDownItems, desired);
+                        ApplyMapState(asdControl, mi.DropDownItems, desired, enforceVisibility);
                     }
                 }
             }
@@ -2818,6 +4384,7 @@ namespace vatSysWindowManager
         public List<WindowLayoutEntry> Windows { get; set; }
         public AsdState Asd { get; set; }
         public List<string> ControlledSectors { get; set; }
+        public string StripMode { get; set; }
     }
 
     internal class DisplayPositionInfo
