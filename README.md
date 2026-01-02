@@ -47,17 +47,18 @@ Behavior details:
 
 ## Files and storage
 - Layout files are saved as JSON files with extension `*.layout.json`.
-- Default storage locations (created automatically):
-  - `<plugin-folder>\Layouts\` (preferred when plugin can determine its own location), or
-  - `%USERPROFILE%\Documents\vatSysWindowManager\` (fallback).
+- Default storage location (created automatically):
+  - `%USERPROFILE%\Documents\vatSys Window Manager\`
+  - If Documents is unavailable, it falls back to `<plugin-folder>\Layouts\`.
+- On load, the plugin will migrate any legacy layouts/autoload config found next to the plugin DLL (`<plugin-folder>\Layouts\`) or `%USERPROFILE%\Documents\vatSysWindowManager\` (and `%USERPROFILE%\Documents\vatSys Window Manager\`) into the current layout root. Existing files in the destination are left untouched.
 - Layout file naming:
   - `POSITION__LayoutName.layout.json` (safe-file-name normalized)
   - Legacy single-file layout: `POSITION.layout.json`
 - Auto-load configuration is stored at `autoload.json` inside the layout root. It maps position name -> layout name.
 
 Example:
-- `Layouts\LONDON__MyOps.layout.json`
-- `Layouts\autoload.json`
+- `%USERPROFILE%\Documents\vatSys Window Manager\LONDON__MyOps.layout.json`
+- `%USERPROFILE%\Documents\vatSys Window Manager\autoload.json`
 
 You can manually edit `autoload.json` if you need to set autoload entries outside the UI. The file is a simple JSON dictionary.
 
@@ -80,7 +81,7 @@ You can manually edit `autoload.json` if you need to set autoload entries outsid
 - If windows fail to re-create, ensure vatSys APIs used by the plugin (for opening PM/ATIS/arrival/strip windows) are available in your vatSys version.
 
 ## Troubleshooting tips (quick)
-- Layout root: check the `Layouts` folder next to the plugin DLL or `%USERPROFILE%\Documents\vatSysWindowManager\`.
+- Layout root: `%USERPROFILE%\Documents\vatSys Window Manager`.
 - Debug output: run vatSys under a debugger or inspect `Debug.WriteLine` output to diagnose reflection/restore issues.
 - To clear an autoload mapping, either use the UI `Auto load for this position` toggle or delete/modify `autoload.json`.
 

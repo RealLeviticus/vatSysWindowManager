@@ -33,6 +33,17 @@ namespace vatSysWindowManager
         private LayoutSnapshot lastArrivalSnapshot;
         private HashSet<Form> lastArrivalDesired;
 
+        // Constants for BindingFlags to reduce duplication
+        private static readonly BindingFlags InstanceFlags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        private static readonly BindingFlags StaticFlags = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
+
+        // Constants for retry delays
+        private const int ShortRetryDelayMs = 250;
+        private const int MediumRetryDelayMs = 600;
+        private const int LongRetryDelayMs = 1200;
+        private const int FinalRetryDelayMs = 1400;
+        private const int VeryLongRetryDelayMs = 2000;
+
         public string Name => "WindowManager";
 
         public WindowManagerPlugin()
@@ -47,6 +58,7 @@ namespace vatSysWindowManager
             rootMenuItem.DropDownItems.Add(saveLayoutMenuItem);
             rootMenuItem.DropDownItems.Add(loadLayoutMenuItem);
 
+            MigrateLegacyLayouts();
             LoadAutoLoadMap();
 
             arrivalLogPath = Path.Combine(LayoutRoot(), "arrival_debug.log");
@@ -101,7 +113,7 @@ namespace vatSysWindowManager
             try
             {
                 if (primePositionChangedHandler != null) return;
-                var field = typeof(MMI).GetField("PrimePositonChanged", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var field = typeof(MMI).GetField("PrimePositonChanged", StaticFlags);
                 if (field == null) return;
 
                 primePositionChangedHandler = (s, e) => RunOnUiThread(() =>
@@ -135,7 +147,10 @@ namespace vatSysWindowManager
                 }
                 DumpArrivalWindows("Initial arrival dump");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LogError("HookArrivalEvents", ex);
+            }
         }
 
         private void RunOnUiThread(Action action)
@@ -151,6 +166,38 @@ namespace vatSysWindowManager
             {
                 action();
             }
+        }
+
+        // Helper method to resolve types across all loaded assemblies
+        private Type ResolveType(string typeName)
+        {
+            if (string.IsNullOrWhiteSpace(typeName)) return null;
+
+            return Type.GetType(typeName) ??
+                   AppDomain.CurrentDomain.GetAssemblies()
+                       .Select(a => a.GetType(typeName, false))
+                       .FirstOrDefault(t => t != null);
+        }
+
+        // Helper method to check if a form is valid (not null and not disposed)
+        private bool IsFormValid(Form form) => form != null && !form.IsDisposed;
+
+        // Helper method to normalize airport codes
+        private string NormalizeAirport(string value) =>
+            string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().ToUpperInvariant();
+
+        // Helper method to safely get metadata string value
+        private bool TryGetMetadataString(Dictionary<string, string> metadata, string key, out string value)
+        {
+            value = null;
+            if (metadata == null) return false;
+            return metadata.TryGetValue(key, out value);
+        }
+
+        // Helper method for consistent error logging
+        private void LogError(string operation, Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"WindowManager [{operation}] failed: {ex.Message}");
         }
 
         private void BuildLoadMenuItems()
@@ -189,12 +236,17 @@ namespace vatSysWindowManager
                     BuildLoadMenuItems();
                 };
 
+                var overrideItem = new ToolStripMenuItem("Override current layout");
+                overrideItem.Click += (s, e) => OverrideLayout(layout, currentPosition);
+
                 var deleteItem = new ToolStripMenuItem("Delete");
                 deleteItem.Click += (s, e) => DeleteLayout(layout, currentPosition);
 
                 layoutItem.DropDownItems.Add(loadItem);
                 layoutItem.DropDownItems.Add(new ToolStripSeparator());
                 layoutItem.DropDownItems.Add(autoItem);
+                layoutItem.DropDownItems.Add(new ToolStripSeparator());
+                layoutItem.DropDownItems.Add(overrideItem);
                 layoutItem.DropDownItems.Add(new ToolStripSeparator());
                 layoutItem.DropDownItems.Add(deleteItem);
                 loadLayoutMenuItem.DropDownItems.Add(layoutItem);
@@ -205,9 +257,9 @@ namespace vatSysWindowManager
         {
             try
             {
-                var method = form.GetType().GetMethod("PositionsToolStripMenuItem_DropDownOpened", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public) ??
-                             form.GetType().GetMethod("positionsToolStripMenuItem_DropDownOpened", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                var menuField = form.GetType().GetField("positionsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var method = form.GetType().GetMethod("PositionsToolStripMenuItem_DropDownOpened", InstanceFlags) ??
+                             form.GetType().GetMethod("positionsToolStripMenuItem_DropDownOpened", InstanceFlags);
+                var menuField = form.GetType().GetField("positionsToolStripMenuItem", InstanceFlags);
                 var menu = menuField?.GetValue(form) as ToolStripMenuItem;
 
                 if (method != null && menu != null)
@@ -292,7 +344,10 @@ namespace vatSysWindowManager
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LogError("InferStripMode", ex);
+            }
 
             return null;
         }
@@ -326,10 +381,13 @@ namespace vatSysWindowManager
                 {
                     try
                     {
-                        var prop = typeof(MMI).GetProperty("StripMode", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                        var prop = typeof(MMI).GetProperty("StripMode", StaticFlags);
                         prop?.SetValue(null, parsed);
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        LogError("SetStripMode", ex);
+                    }
                 });
             }
             catch
@@ -344,7 +402,7 @@ namespace vatSysWindowManager
 
             try
             {
-                var field = typeof(MMI).GetField("arrivalListsW", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var field = typeof(MMI).GetField("arrivalListsW", StaticFlags);
                 var list = field?.GetValue(null) as System.Collections.IEnumerable;
                 if (list != null)
                 {
@@ -362,28 +420,136 @@ namespace vatSysWindowManager
             return result;
         }
 
-        private string LayoutRoot()
+        private IEnumerable<Form> GetAtisWindowsFromMMI()
         {
+            List<Form> result = new List<Form>();
+
             try
             {
-                var pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-                if (!string.IsNullOrWhiteSpace(pluginDir) && Directory.Exists(pluginDir))
+                var field = typeof(MMI).GetField("atisW", StaticFlags);
+                var list = field?.GetValue(null) as System.Collections.IEnumerable;
+                if (list != null)
                 {
-                    var root = Path.Combine(pluginDir, "Layouts");
+                    foreach (var item in list)
+                    {
+                        if (item is Form f) result.Add(f);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("GetAtisWindowsFromMMI", ex);
+            }
+
+            return result;
+        }
+
+        private string LayoutRoot()
+        {
+            // Prefer Documents; fall back to plugin folder if Documents is unavailable/redirected.
+            try
+            {
+                var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                if (!string.IsNullOrWhiteSpace(docs))
+                {
+                    var root = Path.Combine(docs, "vatSys Window Manager");
                     Directory.CreateDirectory(root);
                     return root;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // fall back to documents path
+                System.Diagnostics.Debug.WriteLine($"WindowManager: failed to use Documents for layout root: {ex}");
             }
 
-            var fallback = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "vatSysWindowManager");
-            Directory.CreateDirectory(fallback);
-            return fallback;
+            var pluginRoot = Path.Combine(GetPluginDirectory(), "Layouts");
+            Directory.CreateDirectory(pluginRoot);
+            return pluginRoot;
+        }
+
+        private void MigrateLegacyLayouts()
+        {
+            try
+            {
+                var destination = LayoutRoot();
+
+                var legacyRoots = new[]
+                {
+                    Path.Combine(GetPluginDirectory(), "Layouts"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "vatSysWindowManager"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "vatSysWindowManager", "Layouts"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "vatSys Window Manager"),
+                }
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var legacyRoot in legacyRoots)
+                {
+                    if (string.Equals(legacyRoot, destination, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!Directory.Exists(legacyRoot)) continue;
+
+                    var files = Directory.GetFiles(legacyRoot, "*.layout.json", SearchOption.TopDirectoryOnly)
+                        .Concat(Directory.GetFiles(legacyRoot, "autoload.json", SearchOption.TopDirectoryOnly));
+
+                    foreach (var file in files)
+                    {
+                        var destFile = Path.Combine(destination, Path.GetFileName(file));
+                        if (string.Equals(file, destFile, StringComparison.OrdinalIgnoreCase)) continue;
+
+                        try
+                        {
+                            if (File.Exists(destFile)) continue; // keep existing layouts/configs in the new location
+                            File.Move(file, destFile);
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"WindowManager: failed to migrate layout '{file}' to '{destFile}': {ex}");
+                        }
+                    }
+
+                    try
+                    {
+                        if (!Directory.EnumerateFileSystemEntries(legacyRoot).Any())
+                        {
+                            Directory.Delete(legacyRoot, true);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore cleanup issues
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"WindowManager: layout migration failed: {ex}");
+            }
+        }
+
+        private string GetPluginDirectory()
+        {
+            try
+            {
+                var location = Assembly.GetExecutingAssembly().Location;
+                var dir = Path.GetDirectoryName(location);
+                if (!string.IsNullOrWhiteSpace(dir)) return dir;
+            }
+            catch
+            {
+                // ignore and fall through to other options
+            }
+
+            try
+            {
+                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                if (!string.IsNullOrWhiteSpace(baseDir)) return baseDir;
+            }
+            catch
+            {
+                // ignore and fall through to current directory
+            }
+
+            return Directory.GetCurrentDirectory();
         }
 
         private string AutoLoadConfigPath()
@@ -413,7 +579,7 @@ namespace vatSysWindowManager
             foreach (Form form in Application.OpenForms)
             {
                 if (form == null || form.IsDisposed) continue;
-                if (IsArrivalWindow(form) && !form.Visible) continue;
+                if (ShouldAlwaysSave(form) && !form.Visible) continue;
                 var handle = form.IsHandleCreated ? form.Handle : IntPtr.Zero;
                 if (handle != IntPtr.Zero && !seen.Add(handle)) continue;
                 yield return form;
@@ -425,6 +591,31 @@ namespace vatSysWindowManager
                 var handle = arrival.IsHandleCreated ? arrival.Handle : IntPtr.Zero;
                 if (handle != IntPtr.Zero && !seen.Add(handle)) continue;
                 yield return arrival;
+            }
+
+            foreach (var atis in GetAtisWindowsFromMMI())
+            {
+                if (atis == null || atis.IsDisposed) continue;
+                var handle = atis.IsHandleCreated ? atis.Handle : IntPtr.Zero;
+                if (handle != IntPtr.Zero && !seen.Add(handle)) continue;
+                yield return atis;
+            }
+
+            var vscs = GetVsCsWindow();
+            System.Diagnostics.Debug.WriteLine($"WindowManager: GetVsCsWindow returned: {(vscs != null ? vscs.GetType().FullName : "null")}");
+            if (vscs != null && !vscs.IsDisposed)
+            {
+                var handle = vscs.IsHandleCreated ? vscs.Handle : IntPtr.Zero;
+                System.Diagnostics.Debug.WriteLine($"WindowManager: VSCS handle: {handle}, HandleCreated: {vscs.IsHandleCreated}");
+                if (handle != IntPtr.Zero && seen.Add(handle))
+                {
+                    System.Diagnostics.Debug.WriteLine($"WindowManager: Yielding VSCS window for enumeration");
+                    yield return vscs;
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine($"WindowManager: VSCS not yielded - handle zero: {handle == IntPtr.Zero}, already seen: {!seen.Add(handle)}");
+                }
             }
         }
 
@@ -449,9 +640,13 @@ namespace vatSysWindowManager
 
                 foreach (Form form in EnumerateFormsForSave())
                 {
+                    System.Diagnostics.Debug.WriteLine($"WindowManager: Enumerating form: {form?.GetType().FullName} - {form?.Text} - Visible: {form?.Visible}");
+
                     var entry = BuildEntry(form);
                     if (entry != null)
                     {
+                        System.Diagnostics.Debug.WriteLine($"WindowManager: Built entry for: {entry.TypeName}");
+
                         if (entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
                         {
                             if (entry.Metadata != null && entry.Metadata.TryGetValue("Airport", out var ap))
@@ -463,7 +658,20 @@ namespace vatSysWindowManager
                                 SafeLogArrival($"Captured arrival window save: (no airport) title={entry.Title}");
                             }
                         }
+                        else if (entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal))
+                        {
+                            System.Diagnostics.Debug.WriteLine($"WindowManager: Captured ATIS window: {entry.Title}");
+                        }
+                        else if (entry.TypeName.IndexOf("VSCSWindow", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            System.Diagnostics.Debug.WriteLine($"WindowManager: Captured VSCS window: {entry.Title}");
+                        }
+
                         snapshot.Windows.Add(entry);
+                    }
+                    else
+                    {
+                        System.Diagnostics.Debug.WriteLine($"WindowManager: BuildEntry returned null for: {form?.GetType().FullName}");
                     }
                 }
 
@@ -565,8 +773,8 @@ namespace vatSysWindowManager
             try
             {
                 if (form == null || form.IsDisposed) return null;
-                var isArrival = IsArrivalWindow(form);
-                if (!form.Visible && !isArrival) return null;
+                var shouldAlwaysSave = ShouldAlwaysSave(form);
+                if (!form.Visible && !shouldAlwaysSave) return null;
 
                 var placement = User32.GetWindowPlacement(form.Handle);
             var entry = new WindowLayoutEntry
@@ -594,7 +802,10 @@ namespace vatSysWindowManager
                     entry.Metadata["WindowState"] = "Maximized";
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LogError("BuildEntry_CaptureWindowState", ex);
+            }
 
             return entry;
         }
@@ -721,13 +932,13 @@ namespace vatSysWindowManager
 
         private string GetStringField(object instance, string fieldName)
         {
-            var field = instance.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var field = instance.GetType().GetField(fieldName, InstanceFlags);
             return field?.GetValue(instance) as string;
         }
 
         private object GetEnumField(object instance, string fieldName)
         {
-            var field = instance.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var field = instance.GetType().GetField(fieldName, InstanceFlags);
             return field?.GetValue(instance);
         }
 
@@ -737,7 +948,7 @@ namespace vatSysWindowManager
 
             try
             {
-                var prop = instance.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var prop = instance.GetType().GetProperty(propertyName, InstanceFlags);
                 if (prop != null && prop.CanWrite)
                 {
                     prop.SetValue(instance, value);
@@ -751,7 +962,7 @@ namespace vatSysWindowManager
 
         private string GetPropertyString(object instance, string propertyName)
         {
-            var prop = instance.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var prop = instance.GetType().GetProperty(propertyName, InstanceFlags);
             var value = prop?.GetValue(instance);
             return value as string ?? value?.ToString();
         }
@@ -808,6 +1019,11 @@ namespace vatSysWindowManager
                 if (entry.TypeName != null && entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
                 {
                     // Arrival windows are handled in a dedicated pass.
+                    continue;
+                }
+                if (entry.TypeName != null && entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal))
+                {
+                    // ATIS windows are handled in FindExisting pass.
                     continue;
                 }
 
@@ -1019,7 +1235,7 @@ namespace vatSysWindowManager
                                          string.Equals(f.GetType().FullName, "vatsys.MainForm", StringComparison.OrdinalIgnoreCase));
                 if (main == null) return;
 
-                var windowsMenuField = main.GetType().GetField("windowsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var windowsMenuField = main.GetType().GetField("windowsToolStripMenuItem", InstanceFlags);
                 var windowsMenu = windowsMenuField?.GetValue(main) as ToolStripMenuItem;
                 if (windowsMenu == null) return;
 
@@ -1051,12 +1267,12 @@ namespace vatSysWindowManager
                 if (openNew == null) return;
                 openNew.ShowDropDown();
 
-                var field = main.GetType().GetField("arrivalListAirportTextField", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var field = main.GetType().GetField("arrivalListAirportTextField", InstanceFlags);
                 var control = field?.GetValue(main) as Control;
                 if (control != null)
                 {
                     control.Text = airport ?? string.Empty;
-                    var onReturn = main.GetType().GetMethod("ArrivalListAirportTextField_OnReturn", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var onReturn = main.GetType().GetMethod("ArrivalListAirportTextField_OnReturn", InstanceFlags);
                     onReturn?.Invoke(main, new object[] { control, EventArgs.Empty });
                 }
             }
@@ -1070,10 +1286,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var type = Type.GetType(typeName) ??
-                           AppDomain.CurrentDomain.GetAssemblies()
-                               .Select(a => a.GetType(typeName, false))
-                               .FirstOrDefault(t => t != null);
+                var type = ResolveType(typeName);
 
                 if (type != null && typeof(Form).IsAssignableFrom(type))
                 {
@@ -1345,6 +1558,10 @@ namespace vatSysWindowManager
                 {
                     EnsureOzStripsPlacement(window, placement.Value, metadata);
                 }
+                else if (IsVsCs(entry))
+                {
+                    EnsureVSCSPlacement(window, placement.Value, metadata);
+                }
             }
             else if (IsOzStrips(entry))
             {
@@ -1391,10 +1608,36 @@ namespace vatSysWindowManager
 
         private Form FindExisting(WindowLayoutEntry entry)
         {
-            var forms = Application.OpenForms.Cast<Form>()
+            var forms = new List<Form>();
+
+            // Add forms from Application.OpenForms
+            forms.AddRange(Application.OpenForms.Cast<Form>()
                 .Where(f => f != null && !f.IsDisposed)
-                .Where(f => !isRestoringLayout || !windowsUsedDuringRestore.Contains(f))
-                .ToList();
+                .Where(f => !isRestoringLayout || !windowsUsedDuringRestore.Contains(f)));
+
+            // Add ATIS windows from MMI.atisW (they're not in Application.OpenForms)
+            foreach (var atisWindow in GetAtisWindowsFromMMI())
+            {
+                if (atisWindow != null && !atisWindow.IsDisposed &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(atisWindow)) &&
+                    !forms.Contains(atisWindow))
+                {
+                    var callsign = GetStringField(atisWindow, "ATISCallsign");
+                    System.Diagnostics.Debug.WriteLine($"WindowManager: FindExisting adding ATIS window with callsign: '{callsign}', Title: '{atisWindow.Text}'");
+                    forms.Add(atisWindow);
+                }
+            }
+
+            // Add arrival windows from MMI.arrivalListsW (they might not be in Application.OpenForms)
+            foreach (var arrival in GetArrivalWindowsFromMMI())
+            {
+                if (arrival != null && !arrival.IsDisposed &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(arrival)) &&
+                    !forms.Contains(arrival))
+                {
+                    forms.Add(arrival);
+                }
+            }
 
             if (IsVsCs(entry))
             {
@@ -1431,13 +1674,37 @@ namespace vatSysWindowManager
         {
             if (entry == null) return null;
 
-            var forms = Application.OpenForms.Cast<Form>()
+            var forms = new List<Form>();
+
+            // Add forms from Application.OpenForms
+            forms.AddRange(Application.OpenForms.Cast<Form>()
                 .Where(f => f != null && !f.IsDisposed)
-                .Where(f => !isRestoringLayout || !windowsUsedDuringRestore.Contains(f))
-                .ToList();
+                .Where(f => !isRestoringLayout || !windowsUsedDuringRestore.Contains(f)));
+
+            // Add ATIS windows from MMI.atisW (they're not in Application.OpenForms)
+            foreach (var atisWindow in GetAtisWindowsFromMMI())
+            {
+                if (atisWindow != null && !atisWindow.IsDisposed &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(atisWindow)) &&
+                    !forms.Contains(atisWindow))
+                {
+                    forms.Add(atisWindow);
+                }
+            }
+
+            // Add arrival windows from MMI.arrivalListsW (they might not be in Application.OpenForms)
+            foreach (var arrival in GetArrivalWindowsFromMMI())
+            {
+                if (arrival != null && !arrival.IsDisposed &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(arrival)) &&
+                    !forms.Contains(arrival))
+                {
+                    forms.Add(arrival);
+                }
+            }
 
             if (entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal) &&
-                entry.Metadata.TryGetValue("ATISCallsign", out var atis) &&
+                TryGetMetadataString(entry.Metadata, "ATISCallsign", out var atis) &&
                 !string.IsNullOrWhiteSpace(atis))
             {
                 var atisMatch = forms.FirstOrDefault(f =>
@@ -1499,7 +1766,24 @@ namespace vatSysWindowManager
 
             string callsign = atisCallsign.Trim();
 
-            // Prefer an existing unused ATIS window with the same callsign.
+            // Prefer an existing unused ATIS window with the same callsign - check MMI.atisW first
+            foreach (var atis in GetAtisWindowsFromMMI())
+            {
+                if (atis != null && !atis.IsDisposed &&
+                    (!isRestoringLayout || !windowsUsedDuringRestore.Contains(atis)))
+                {
+                    var atisField = GetStringField(atis, "ATISCallsign");
+                    System.Diagnostics.Debug.WriteLine($"WindowManager: Checking ATIS window - Field: '{atisField}' vs Looking for: '{callsign}'");
+                    if (string.Equals(atisField, callsign, StringComparison.OrdinalIgnoreCase))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"WindowManager: Found matching ATIS window for: {callsign}");
+                        TrackPluginWindow(atis);
+                        return atis;
+                    }
+                }
+            }
+
+            // Also check Application.OpenForms as fallback
             var existing = Application.OpenForms.Cast<Form>()
                 .FirstOrDefault(f =>
                     f != null &&
@@ -1513,49 +1797,9 @@ namespace vatSysWindowManager
                 return existing;
             }
 
-            // Try the built-in launcher.
-            MMI.OpenATISWindow(callsign);
-
-            var found = WaitForForm(entry.TypeName, f =>
-                string.Equals(GetStringField(f, "ATISCallsign"), callsign, StringComparison.OrdinalIgnoreCase) &&
-                (!isRestoringLayout || !windowsUsedDuringRestore.Contains(f)), 5, 180);
-            if (found != null)
-            {
-                TrackPluginWindow(found);
-                return found;
-            }
-
-            // If vatsys reuses a single ATIS window per callsign, create one manually to allow multiple instances.
-            var type = Type.GetType(entry.TypeName) ??
-                       AppDomain.CurrentDomain.GetAssemblies()
-                           .Select(a => a.GetType(entry.TypeName, false))
-                           .FirstOrDefault(t => t != null);
-
-            if (type != null && typeof(Form).IsAssignableFrom(type))
-            {
-                try
-                {
-                    var instance = Activator.CreateInstance(type) as Form;
-                    if (instance != null)
-                    {
-                        try
-                        {
-                            var field = type.GetField("ATISCallsign", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-                            field?.SetValue(instance, callsign);
-                        }
-                        catch { }
-
-                        instance.Show();
-                        TrackPluginWindow(instance);
-                        return instance;
-                    }
-                }
-                catch
-                {
-                    // ignore and fall through
-                }
-            }
-
+            // Don't create new ATIS windows - only reuse existing ones
+            // ATIS windows are typically opened when the position loads, so they should already exist
+            System.Diagnostics.Debug.WriteLine($"WindowManager: Could not find existing ATIS window for callsign: {callsign}");
             return null;
         }
 
@@ -1626,10 +1870,7 @@ namespace vatSysWindowManager
 
             if (typeName.EndsWith("ATISWindow", StringComparison.Ordinal))
             {
-                if (metadata.TryGetValue("ATISCallsign", out var atis) && !string.IsNullOrWhiteSpace(atis))
-                {
-                    form.Text = $"ATIS - {atis}";
-                }
+                // ATIS windows already have the correct title format, don't change it
                 return;
             }
 
@@ -1712,10 +1953,7 @@ namespace vatSysWindowManager
             }
 
             // Manual creation fallback.
-            var type = Type.GetType(typeName) ??
-                       AppDomain.CurrentDomain.GetAssemblies()
-                           .Select(a => a.GetType(typeName, false))
-                           .FirstOrDefault(t => t != null);
+            var type = ResolveType(typeName);
 
             if (type != null && typeof(Form).IsAssignableFrom(type))
             {
@@ -1857,9 +2095,21 @@ namespace vatSysWindowManager
                 metadata.TryGetValue("ATISCallsign", out var atis) &&
                 !string.IsNullOrWhiteSpace(atis))
             {
+                System.Diagnostics.Debug.WriteLine($"WindowManager: FindMetadataMatch looking for ATIS: {atis}, found {candidates.Count} candidate windows");
+                foreach (var candidate in candidates)
+                {
+                    var callsign = GetStringField(candidate, "ATISCallsign");
+                    System.Diagnostics.Debug.WriteLine($"WindowManager:   Candidate ATISCallsign field: '{callsign}'");
+                }
+
                 var atisWindow = candidates.FirstOrDefault(f =>
                     string.Equals(GetStringField(f, "ATISCallsign"), atis, StringComparison.OrdinalIgnoreCase));
-                if (atisWindow != null) return atisWindow;
+                if (atisWindow != null)
+                {
+                    System.Diagnostics.Debug.WriteLine($"WindowManager: Found matching ATIS window in FindMetadataMatch");
+                    return atisWindow;
+                }
+                System.Diagnostics.Debug.WriteLine($"WindowManager: No matching ATIS window found in FindMetadataMatch");
             }
 
             var asdMatch = FindAsdMatch(candidates, metadata);
@@ -1937,10 +2187,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var type = Type.GetType(entry.TypeName) ??
-                           AppDomain.CurrentDomain.GetAssemblies()
-                               .Select(a => a.GetType(entry.TypeName, false))
-                               .FirstOrDefault(t => t != null);
+                var type = ResolveType(entry.TypeName);
 
                 if (type == null || !typeof(Form).IsAssignableFrom(type)) return null;
 
@@ -2115,13 +2362,10 @@ namespace vatSysWindowManager
                     }
                 }
 
-                var resolvedType = Type.GetType(entry.TypeName) ??
-                                   AppDomain.CurrentDomain.GetAssemblies()
-                                       .Select(a => a.GetType(entry.TypeName, false))
-                                       .FirstOrDefault(t => t != null);
+                var resolvedType = ResolveType(entry.TypeName);
 
                 if (entry.TypeName.EndsWith("ChatWindow", StringComparison.Ordinal) &&
-                    entry.Metadata.TryGetValue("Recipient", out var recipient))
+                    TryGetMetadataString(entry.Metadata, "Recipient", out var recipient))
                 {
                     MMI.OpenPMWindow(recipient);
                     var w = FindWindow(entry.TypeName, f => string.Equals(GetStringField(f, "Recipient"), recipient, StringComparison.OrdinalIgnoreCase));
@@ -2130,7 +2374,7 @@ namespace vatSysWindowManager
                 }
 
                 if (entry.TypeName.EndsWith("ATISWindow", StringComparison.Ordinal) &&
-                    entry.Metadata.TryGetValue("ATISCallsign", out var atis))
+                    TryGetMetadataString(entry.Metadata, "ATISCallsign", out var atis))
                 {
                     var w = RestoreAtisWindow(entry, atis);
                     if (w != null) return w;
@@ -2150,10 +2394,11 @@ namespace vatSysWindowManager
                 }
 
                 if (entry.TypeName.EndsWith("StripWindow", StringComparison.Ordinal) &&
-                    entry.Metadata.TryGetValue("Beacon", out var beacon) &&
-                    entry.Metadata.TryGetValue("StripWindowType", out var stripTypeName))
+                    TryGetMetadataString(entry.Metadata, "Beacon", out var beacon) &&
+                    TryGetMetadataString(entry.Metadata, "StripWindowType", out var stripTypeName))
                 {
-                    CreateStripWindow(stripTypeName, entry.Metadata.TryGetValue("HMIState", out var hmi) ? hmi : null, beacon);
+                    TryGetMetadataString(entry.Metadata, "HMIState", out var hmi);
+                    CreateStripWindow(stripTypeName, hmi, beacon);
                     return FindWindow(entry.TypeName, f => string.Equals(GetStringField(f, "Beacon"), beacon, StringComparison.OrdinalIgnoreCase));
                 }
 
@@ -2247,7 +2492,7 @@ namespace vatSysWindowManager
             {
                 var menus = new List<ToolStripMenuItem>();
 
-                var menuFields = form.GetType().GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                var menuFields = form.GetType().GetFields(InstanceFlags)
                     .Where(f => typeof(MenuStrip).IsAssignableFrom(f.FieldType))
                     .ToList();
 
@@ -2453,7 +2698,7 @@ namespace vatSysWindowManager
             ToolStripMenuItem windowsMenu = null;
             try
             {
-                var windowsMenuField = mainForm.GetType().GetField("windowsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var windowsMenuField = mainForm.GetType().GetField("windowsToolStripMenuItem", InstanceFlags);
                 windowsMenu = windowsMenuField?.GetValue(mainForm) as ToolStripMenuItem;
                 if (windowsMenu == null) return false;
 
@@ -2550,7 +2795,7 @@ namespace vatSysWindowManager
 
         private Control GetAsdControl(Form form)
         {
-            var fields = form.GetType().GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var fields = form.GetType().GetFields(InstanceFlags);
             foreach (var field in fields)
             {
                 if (typeof(Control).IsAssignableFrom(field.FieldType) &&
@@ -2611,8 +2856,8 @@ namespace vatSysWindowManager
 
                 var candidates = new[]
                 {
-                    asdControl.GetType().GetField("StoredCentreLL", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)?.GetValue(asdControl),
-                    asdControl.GetType().GetField("settingVisCenter", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)?.GetValue(asdControl)
+                    asdControl.GetType().GetField("StoredCentreLL", InstanceFlags)?.GetValue(asdControl),
+                    asdControl.GetType().GetField("settingVisCenter", InstanceFlags)?.GetValue(asdControl)
                 };
 
                 foreach (var coord in candidates)
@@ -2676,14 +2921,14 @@ namespace vatSysWindowManager
                 {
                     var field = asd.GetType().GetField("displayPosition", BindingFlags.Instance | BindingFlags.NonPublic);
                     field?.SetValue(asd, targetPosition);
-                    var prop = asd.GetType().GetProperty("DisplayPosition", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var prop = asd.GetType().GetProperty("DisplayPosition", InstanceFlags);
                     prop?.SetValue(asd, targetPosition, null);
                     applied = true;
                 }
 
                 if (!applied && remainingRetries > 0)
                 {
-                    var delay = remainingRetries == 1 ? 600 : 250;
+                    var delay = remainingRetries == 1 ? MediumRetryDelayMs : ShortRetryDelayMs;
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(delay);
@@ -2764,7 +3009,7 @@ namespace vatSysWindowManager
         {
             try
             {
-            var menuField = form.GetType().GetField("positionsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var menuField = form.GetType().GetField("positionsToolStripMenuItem", InstanceFlags);
             if (menuField == null) return false;
             var menu = menuField.GetValue(form) as ToolStripMenuItem;
             if (menu == null) return false;
@@ -2804,7 +3049,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var menuField = form.GetType().GetField("positionsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var menuField = form.GetType().GetField("positionsToolStripMenuItem", InstanceFlags);
                 if (menuField == null) return false;
                 var menu = menuField.GetValue(form) as ToolStripMenuItem;
                 if (menu == null) return false;
@@ -2878,6 +3123,17 @@ namespace vatSysWindowManager
         {
             var typeName = form?.GetType().FullName ?? string.Empty;
             return typeName.EndsWith("SequenceWindow", StringComparison.Ordinal);
+        }
+
+        private bool IsAtisWindow(Form form)
+        {
+            var typeName = form?.GetType().FullName ?? string.Empty;
+            return typeName.EndsWith("ATISWindow", StringComparison.Ordinal);
+        }
+
+        private bool ShouldAlwaysSave(Form form)
+        {
+            return IsArrivalWindow(form) || IsAtisWindow(form) || IsVsCs(form);
         }
 
         private void TrackPluginWindow(Form form)
@@ -2999,7 +3255,7 @@ namespace vatSysWindowManager
 
                 if (remainingRetries > 0)
                 {
-                    var delayMs = remainingRetries >= 3 ? 250 : (remainingRetries == 2 ? 700 : 1400);
+                    var delayMs = remainingRetries >= 3 ? ShortRetryDelayMs : (remainingRetries == 2 ? MediumRetryDelayMs : FinalRetryDelayMs);
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(delayMs);
@@ -3046,7 +3302,7 @@ namespace vatSysWindowManager
 
                 if (remainingRetries > 0)
                 {
-                    var delayMs = remainingRetries >= 3 ? 250 : (remainingRetries == 2 ? 700 : 1400);
+                    var delayMs = remainingRetries >= 3 ? ShortRetryDelayMs : (remainingRetries == 2 ? MediumRetryDelayMs : FinalRetryDelayMs);
                     _ = Task.Run(async () =>
                     {
                         await Task.Delay(delayMs);
@@ -3070,7 +3326,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var storedRangeField = asd.GetType().GetField("StoredRange", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var storedRangeField = asd.GetType().GetField("StoredRange", InstanceFlags);
                 if (storedRangeField != null)
                 {
                     var rounded = (int)Math.Round(r);
@@ -3079,7 +3335,7 @@ namespace vatSysWindowManager
 
                 var setZoom = asd.GetType().GetMethod(
                     "SetZoom",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                    InstanceFlags,
                     null,
                     new[] { typeof(double), typeof(bool), typeof(bool), typeof(bool) },
                     null);
@@ -3139,7 +3395,7 @@ namespace vatSysWindowManager
 
             if (isMainAsd)
             {
-                var mainRangeField = typeof(MMI).GetField("MAIN_ASD_RANGE", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var mainRangeField = typeof(MMI).GetField("MAIN_ASD_RANGE", StaticFlags);
                 if (mainRangeField != null)
                 {
                     var value = mainRangeField.FieldType == typeof(double)
@@ -3149,12 +3405,12 @@ namespace vatSysWindowManager
                 }
             }
 
-            var refresh = asd.GetType().GetMethod("OnRangeChanged", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var refresh = asd.GetType().GetMethod("OnRangeChanged", InstanceFlags);
             refresh?.Invoke(asd, null);
 
             try
             {
-                var setRange = asd.GetType().GetMethod("SetRange", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public, null, Type.EmptyTypes, null);
+                var setRange = asd.GetType().GetMethod("SetRange", InstanceFlags, null, Type.EmptyTypes, null);
                 setRange?.Invoke(asd, null);
             }
             catch { }
@@ -3180,12 +3436,12 @@ namespace vatSysWindowManager
 
                 var coord = Activator.CreateInstance(coordType, new object[] { latitude, longitude });
 
-                var storedCentreField = asd.GetType().GetField("StoredCentreLL", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var storedCentreField = asd.GetType().GetField("StoredCentreLL", InstanceFlags);
                 storedCentreField?.SetValue(asd, coord);
 
                 var setCentre = asd.GetType().GetMethod(
                     "SetDisplayCenter",
-                    BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                    InstanceFlags,
                     null,
                     new[] { coordType, typeof(bool), typeof(bool) },
                     null);
@@ -3219,7 +3475,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var eventField = asd.GetType().GetField("RangeChanged", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var eventField = asd.GetType().GetField("RangeChanged", InstanceFlags);
                 if (eventField == null) return;
 
                 EventHandler handler = null;
@@ -3253,7 +3509,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var menuField = asdControl.FindForm()?.GetType().GetField("mapsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var menuField = asdControl.FindForm()?.GetType().GetField("mapsToolStripMenuItem", InstanceFlags);
                 var menu = menuField?.GetValue(asdControl.FindForm()) as ToolStripMenuItem;
                 if (menu == null) return null;
 
@@ -3309,7 +3565,7 @@ namespace vatSysWindowManager
 
             try
             {
-                var dropDownOpened = form.GetType().GetMethod("mapsToolStripMenuItem_DropDownOpened", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var dropDownOpened = form.GetType().GetMethod("mapsToolStripMenuItem_DropDownOpened", InstanceFlags);
                 dropDownOpened?.Invoke(form, new object[] { menu, EventArgs.Empty });
             }
             catch
@@ -3364,7 +3620,7 @@ namespace vatSysWindowManager
                 {
                     await Task.Delay(180);
                     RunOnUiThread(Refresh);
-                    await Task.Delay(250);
+                    await Task.Delay(ShortRetryDelayMs);
                     RunOnUiThread(Refresh);
                 }
                 catch { }
@@ -3380,7 +3636,7 @@ namespace vatSysWindowManager
                 var map = item.Tag;
                 if (map == null) return;
 
-                var setMapVisible = asdControl.GetType().GetMethod("SetMapVisible", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var setMapVisible = asdControl.GetType().GetMethod("SetMapVisible", InstanceFlags);
                 setMapVisible?.Invoke(asdControl, new object[] { map, shouldBeVisible });
             }
             catch
@@ -3401,10 +3657,10 @@ namespace vatSysWindowManager
 
                 var parsed = Enum.Parse(enumType, hmiState, true);
 
-                var field = form.GetType().GetField("State", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var field = form.GetType().GetField("State", InstanceFlags);
                 field?.SetValue(form, parsed);
 
-                var prop = form.GetType().GetProperty("State", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var prop = form.GetType().GetProperty("State", InstanceFlags);
                 if (prop != null && prop.CanWrite)
                 {
                     prop.SetValue(form, parsed);
@@ -3428,7 +3684,7 @@ namespace vatSysWindowManager
             try
             {
                 var asd = GetAsdControl(form);
-                var menuField = form.GetType().GetField("mapsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var menuField = form.GetType().GetField("mapsToolStripMenuItem", InstanceFlags);
                 var menu = menuField?.GetValue(form) as ToolStripMenuItem;
                 if (menu == null) return;
 
@@ -3634,6 +3890,22 @@ namespace vatSysWindowManager
             }
         }
 
+        private void EnsureVSCSPlacement(Form form, User32.WINDOWPLACEMENT placement, Dictionary<string, string> metadata)
+        {
+            if (form == null || form.IsDisposed) return;
+            if (!IsVsCs(form)) return;
+
+            void Reapply()
+            {
+                if (form == null || form.IsDisposed) return;
+                ApplyPlacement(form, placement, metadata);
+            }
+
+            var targetRect = GetTargetRect(placement, metadata);
+            // VSCS may reposition itself, so retry with delays
+            SchedulePlacementRetries(form, Reapply, targetRect, 150, 400, 900, 1600, 2800);
+        }
+
         private void SchedulePlacementRetries(Form form, Action applyAction, params int[] delaysMs)
         {
             var empty = new RECT();
@@ -3788,7 +4060,7 @@ namespace vatSysWindowManager
         {
             try
             {
-                var field = typeof(MMI).GetField("BaseFormPlacements", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var field = typeof(MMI).GetField("BaseFormPlacements", StaticFlags);
                 if (field == null) return;
 
                 var dict = field.GetValue(null) as Dictionary<string, User32.WINDOWPLACEMENT>;
@@ -3951,7 +4223,7 @@ namespace vatSysWindowManager
             {
                 var mmiType = typeof(MMI);
                 var centerField = mmiType.GetField("mainASDCentre", BindingFlags.Static | BindingFlags.NonPublic);
-                var rangeField = mmiType.GetField("MAIN_ASD_RANGE", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var rangeField = mmiType.GetField("MAIN_ASD_RANGE", StaticFlags);
 
                 var coord = centerField?.GetValue(null);
                 if (coord == null || rangeField == null) return null;
@@ -3985,7 +4257,7 @@ namespace vatSysWindowManager
             {
                 var mmiType = typeof(MMI);
                 var centerField = mmiType.GetField("mainASDCentre", BindingFlags.Static | BindingFlags.NonPublic);
-                var rangeField = mmiType.GetField("MAIN_ASD_RANGE", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var rangeField = mmiType.GetField("MAIN_ASD_RANGE", StaticFlags);
 
                 var coordType = typeof(MMI).Assembly.GetType("vatsys.Coordinate");
                 if (centerField == null || rangeField == null || coordType == null) return;
@@ -4169,10 +4441,10 @@ namespace vatSysWindowManager
         {
             try
             {
-                var primeField = typeof(MMI).GetField("primePosition", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var primeField = typeof(MMI).GetField("primePosition", StaticFlags);
                 primeField?.SetValue(null, position);
 
-                var evt = typeof(MMI).GetField("PrimePositonChanged", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+                var evt = typeof(MMI).GetField("PrimePositonChanged", StaticFlags);
                 var handler = evt?.GetValue(null) as EventHandler;
                 handler?.Invoke(null, EventArgs.Empty);
             }
@@ -4187,11 +4459,11 @@ namespace vatSysWindowManager
             {
                 BuildPositionMenu(main);
 
-                var menuField = main.GetType().GetField("positionsToolStripMenuItem", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var menuField = main.GetType().GetField("positionsToolStripMenuItem", InstanceFlags);
                 var menu = menuField?.GetValue(main) as ToolStripMenuItem;
                 if (menu == null) return;
 
-                var expand = main.GetType().GetMethod("ExpandPositionMenuItems", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                var expand = main.GetType().GetMethod("ExpandPositionMenuItems", InstanceFlags);
                 expand?.Invoke(main, new object[] { menu });
 
                 // Prefer matching by menu item tag (LogicalPositions.Position) when possible.
@@ -4215,7 +4487,7 @@ namespace vatSysWindowManager
                 if (!string.Equals(updated, targetPositionName, StringComparison.OrdinalIgnoreCase))
                 {
                     // Try invoking the drop-down handler to ensure menu is fully populated, then retry.
-                    var handler = main.GetType().GetMethod("positionsToolStripMenuItem_DropDownOpened", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var handler = main.GetType().GetMethod("positionsToolStripMenuItem_DropDownOpened", InstanceFlags);
                     if (handler != null)
                     {
                         handler.Invoke(main, new object[] { menu, EventArgs.Empty });
@@ -4343,6 +4615,60 @@ namespace vatSysWindowManager
 
             RunOnUiThread(ShowDialog);
             return result;
+        }
+
+        private void OverrideLayout(LayoutInfo layout, string position)
+        {
+            try
+            {
+                var confirm = MessageBox.Show(
+                    $"Override layout \"{layout.LayoutName}\" with current window configuration?",
+                    "Override layout",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (confirm != DialogResult.Yes) return;
+
+                var snapshot = new LayoutSnapshot
+                {
+                    Position = position,
+                    LayoutName = layout.LayoutName,
+                    SavedUtc = DateTime.UtcNow,
+                    Windows = new List<WindowLayoutEntry>(),
+                    Asd = GetAsdState(),
+                    ControlledSectors = GetControlledSectorNames(),
+                    StripMode = GetStripModeName()
+                };
+
+                foreach (Form form in EnumerateFormsForSave())
+                {
+                    var entry = BuildEntry(form);
+                    if (entry != null)
+                    {
+                        if (entry.TypeName.EndsWith("SequenceWindow", StringComparison.Ordinal))
+                        {
+                            if (entry.Metadata != null && entry.Metadata.TryGetValue("Airport", out var ap))
+                            {
+                                SafeLogArrival($"Captured arrival window override: {ap} title={entry.Title}");
+                            }
+                            else
+                            {
+                                SafeLogArrival($"Captured arrival window override: (no airport) title={entry.Title}");
+                            }
+                        }
+                        snapshot.Windows.Add(entry);
+                    }
+                }
+
+                var json = JsonConvert.SerializeObject(snapshot, Formatting.Indented);
+                File.WriteAllText(layout.Path, json);
+
+                MessageBox.Show($"Layout \"{layout.LayoutName}\" has been overridden for {position}.", "vatSys Window Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to override layout:\n{ex.Message}", "Override layout", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void DeleteLayout(LayoutInfo layout, string position)
