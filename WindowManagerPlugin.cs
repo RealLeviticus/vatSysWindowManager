@@ -426,7 +426,28 @@ namespace vatSysWindowManager
                     try
                     {
                         var prop = typeof(MMI).GetProperty("StripSortMode", StaticFlags);
-                        prop?.SetValue(null, parsed);
+                        if (prop == null) return;
+
+                        // The setter only fires the event when the value changes.
+                        // Force a change by setting a different value first, then the desired one.
+                        var current = prop.GetValue(null);
+                        if (current != null && current.Equals(parsed))
+                        {
+                            // Pick a different value to force the setter to recognise a change.
+                            var values = Enum.GetValues(enumType);
+                            foreach (var v in values)
+                            {
+                                if (!v.Equals(parsed))
+                                {
+                                    prop.SetValue(null, v);
+                                    break;
+                                }
+                            }
+                        }
+                        prop.SetValue(null, parsed);
+
+                        // Also directly update the StripSetupWindow button states for immediate visual feedback
+                        UpdateStripSetupWindowButtons(modeName);
                     }
                     catch (Exception ex)
                     {
@@ -437,6 +458,57 @@ namespace vatSysWindowManager
             catch
             {
                 // ignore
+            }
+        }
+
+        private void UpdateStripSetupWindowButtons(string sortModeName)
+        {
+            if (string.IsNullOrWhiteSpace(sortModeName)) return;
+
+            try
+            {
+                // Find the StripSetupWindow
+                var setupWindow = Application.OpenForms.Cast<Form>()
+                    .FirstOrDefault(f => f != null && !f.IsDisposed && 
+                                     f.GetType().FullName == "vatsys.StripSetupWindow");
+                
+                if (setupWindow == null) return;
+
+                // Map of button field names to their corresponding sort mode
+                var buttonMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "AlphaSortButton", "Alpha" },
+                    { "TimeSortButton", "Time" },
+                    { "LevelSortButton", "Level" }
+                };
+
+                foreach (var mapping in buttonMappings)
+                {
+                    try
+                    {
+                        var field = setupWindow.GetType().GetField(mapping.Key, InstanceFlags);
+                        if (field == null) continue;
+
+                        var button = field.GetValue(setupWindow) as Control;
+                        if (button == null) continue;
+
+                        // ToggleButton has a Checked property
+                        var checkedProp = button.GetType().GetProperty("Checked", InstanceFlags);
+                        if (checkedProp != null && checkedProp.CanWrite)
+                        {
+                            var shouldBeChecked = string.Equals(mapping.Value, sortModeName, StringComparison.OrdinalIgnoreCase);
+                            checkedProp.SetValue(button, shouldBeChecked);
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore individual button update failures
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("UpdateStripSetupWindowButtons", ex);
             }
         }
 
@@ -798,6 +870,9 @@ namespace vatSysWindowManager
 
                 EnsureStateStripWindows(snapshot);
                 CloseExtraStripWindows(snapshot);
+
+                // Re-apply strip sort mode after strip windows are created so they pick up the correct sort order.
+                ApplyStripSortMode(snapshot.StripSortMode);
 
                 // Reapply special placements after everything is up to ensure late-opening windows are aligned.
                 EnforceSpecialPlacements(snapshot);

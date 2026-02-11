@@ -6,7 +6,8 @@
       "Bash(find:*)",
       "Bash(grep:*)",
       "mcp__Desktop_Commander__list_directory",
-      "Bash(dir \"C:\\\\Users\\\\levis\\\\Documents\\\\Development files\\\\vatSys decomp\")"
+      "Bash(dir \"C:\\\\Users\\\\levis\\\\Documents\\\\Development files\\\\vatSys decomp\")",
+      "mcp__Desktop_Commander__start_search"
     ]
   }
 }
