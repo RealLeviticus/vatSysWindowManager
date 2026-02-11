@@ -4,7 +4,9 @@
       "Bash(dotnet build:*)",
       "Bash(Select-String -Pattern \"error|Build succeeded|Build FAILED\" -Context 0,2)",
       "Bash(find:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "mcp__Desktop_Commander__list_directory",
+      "Bash(dir \"C:\\\\Users\\\\levis\\\\Documents\\\\Development files\\\\vatSys decomp\")"
     ]
   }
 }

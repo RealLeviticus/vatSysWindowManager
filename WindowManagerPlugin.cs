@@ -396,6 +396,50 @@ namespace vatSysWindowManager
             }
         }
 
+        private string GetStripSortModeName()
+        {
+            try
+            {
+                var prop = typeof(MMI).GetProperty("StripSortMode", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+                var value = prop?.GetValue(null);
+                return value?.ToString();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void ApplyStripSortMode(string modeName)
+        {
+            if (string.IsNullOrWhiteSpace(modeName)) return;
+
+            try
+            {
+                var enumType = typeof(MMI).GetNestedType("StripSortModes", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic) ??
+                               Type.GetType("vatsys.MMI+StripSortModes");
+                if (enumType == null || !enumType.IsEnum) return;
+
+                var parsed = Enum.Parse(enumType, modeName, true);
+                RunOnUiThread(() =>
+                {
+                    try
+                    {
+                        var prop = typeof(MMI).GetProperty("StripSortMode", StaticFlags);
+                        prop?.SetValue(null, parsed);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("SetStripSortMode", ex);
+                    }
+                });
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
         private IEnumerable<Form> GetArrivalWindowsFromMMI()
         {
             List<Form> result = new List<Form>();
@@ -635,7 +679,8 @@ namespace vatSysWindowManager
                     Windows = new List<WindowLayoutEntry>(),
                     Asd = GetAsdState(),
                     ControlledSectors = GetControlledSectorNames(),
-                    StripMode = GetStripModeName()
+                    StripMode = GetStripModeName(),
+                    StripSortMode = GetStripSortModeName()
                 };
 
                 foreach (Form form in EnumerateFormsForSave())
@@ -723,8 +768,9 @@ namespace vatSysWindowManager
                     return;
                 }
 
-                // Apply strip mode up-front so any strip windows created later use the correct type.
+                // Apply strip mode and sort mode up-front so any strip windows created later use the correct type.
                 ApplyStripMode(snapshot.StripMode ?? InferStripMode(snapshot));
+                ApplyStripSortMode(snapshot.StripSortMode);
 
                 CloseWindowsNotInSnapshot(snapshot);
                 ApplyAsdState(snapshot.Asd);
@@ -1853,16 +1899,23 @@ namespace vatSysWindowManager
 
                 if (!string.IsNullOrWhiteSpace(displayName))
                 {
-                    var baseTitle = form.Text;
-                    var parts = baseTitle?.Split('-').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p)).ToList() ?? new List<string>();
-                    if (parts.Count > 0)
+                    if (typeName.EndsWith("ASMGCSWindow", StringComparison.Ordinal))
                     {
-                        parts[parts.Count - 1] = displayName;
-                        form.Text = string.Join(" - ", parts);
+                        form.Text = $"Ground: {displayName}";
                     }
                     else
                     {
-                        form.Text = displayName;
+                        var baseTitle = form.Text;
+                        var parts = baseTitle?.Split('-').Select(p => p.Trim()).Where(p => !string.IsNullOrWhiteSpace(p)).ToList() ?? new List<string>();
+                        if (parts.Count > 0)
+                        {
+                            parts[parts.Count - 1] = displayName;
+                            form.Text = string.Join(" - ", parts);
+                        }
+                        else
+                        {
+                            form.Text = displayName;
+                        }
                     }
                 }
                 return;
@@ -4637,7 +4690,8 @@ namespace vatSysWindowManager
                     Windows = new List<WindowLayoutEntry>(),
                     Asd = GetAsdState(),
                     ControlledSectors = GetControlledSectorNames(),
-                    StripMode = GetStripModeName()
+                    StripMode = GetStripModeName(),
+                    StripSortMode = GetStripSortModeName()
                 };
 
                 foreach (Form form in EnumerateFormsForSave())
@@ -4711,6 +4765,7 @@ namespace vatSysWindowManager
         public AsdState Asd { get; set; }
         public List<string> ControlledSectors { get; set; }
         public string StripMode { get; set; }
+        public string StripSortMode { get; set; }
     }
 
     internal class DisplayPositionInfo
