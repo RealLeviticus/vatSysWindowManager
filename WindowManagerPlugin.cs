@@ -1046,6 +1046,29 @@ namespace vatSysWindowManager
                     meta["CentreLat"] = centre.Value.Latitude.ToString(CultureInfo.InvariantCulture);
                     meta["CentreLon"] = centre.Value.Longitude.ToString(CultureInfo.InvariantCulture);
                 }
+
+                try
+                {
+                    var atcListField = asd.GetType().GetField("atcListRectangle", InstanceFlags);
+                    if (atcListField != null)
+                    {
+                        var rect = atcListField.GetValue(asd);
+                        if (rect != null)
+                        {
+                            var rectType = rect.GetType();
+                            var aw = Convert.ToSingle(rectType.GetField("Width")?.GetValue(rect) ?? 0f);
+                            var ah = Convert.ToSingle(rectType.GetField("Height")?.GetValue(rect) ?? 0f);
+                            if (aw > 0 && ah > 0)
+                            {
+                                meta["AtcListX"] = Convert.ToSingle(rectType.GetField("X")?.GetValue(rect) ?? 0f).ToString(CultureInfo.InvariantCulture);
+                                meta["AtcListY"] = Convert.ToSingle(rectType.GetField("Y")?.GetValue(rect) ?? 0f).ToString(CultureInfo.InvariantCulture);
+                                meta["AtcListWidth"] = aw.ToString(CultureInfo.InvariantCulture);
+                                meta["AtcListHeight"] = ah.ToString(CultureInfo.InvariantCulture);
+                            }
+                        }
+                    }
+                }
+                catch { }
             }
 
             return meta;
@@ -1712,6 +1735,8 @@ namespace vatSysWindowManager
                 ApplyCheckedMaps(window, maps);
                 ReapplyAsdView(window, metadata, asdType);
             }
+
+            ApplyAtcListPosition(window, metadata);
 
             if (entry.TypeName.EndsWith("StripWindow", StringComparison.Ordinal))
             {
@@ -2768,6 +2793,18 @@ namespace vatSysWindowManager
             return title.IndexOf("OzStrips", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
+        private bool IsASMGCS(Form form)
+        {
+            if (form == null) return false;
+            return (form.GetType().FullName ?? string.Empty).EndsWith("ASMGCSWindow", StringComparison.Ordinal);
+        }
+
+        private bool IsStandardVatSysMap(ToolStripMenuItem item)
+        {
+            if (item?.Tag == null) return false;
+            return string.Equals(item.Tag.GetType().FullName, "vatsys.DisplayMaps+Map", StringComparison.Ordinal);
+        }
+
         private Form FindOzStripsByTitle()
         {
             return Application.OpenForms.Cast<Form>()
@@ -2972,6 +3009,64 @@ namespace vatSysWindowManager
             catch
             {
                 return null;
+            }
+        }
+
+        private void ApplyAtcListPosition(Form form, Dictionary<string, string> metadata)
+        {
+            if (form == null || metadata == null) return;
+
+            try
+            {
+                if (!metadata.TryGetValue("AtcListX", out var xStr) ||
+                    !metadata.TryGetValue("AtcListY", out var yStr) ||
+                    !metadata.TryGetValue("AtcListWidth", out var wStr) ||
+                    !metadata.TryGetValue("AtcListHeight", out var hStr))
+                    return;
+
+                if (!float.TryParse(xStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var x) ||
+                    !float.TryParse(yStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var y) ||
+                    !float.TryParse(wStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) ||
+                    !float.TryParse(hStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var h))
+                    return;
+
+                if (w <= 0 || h <= 0) return;
+
+                Action apply = () =>
+                {
+                    try
+                    {
+                        if (form.IsDisposed) return;
+                        var asd = GetAsdControl(form);
+                        if (asd == null) return;
+
+                        var field = asd.GetType().GetField("atcListRectangle", InstanceFlags);
+                        if (field == null) return;
+
+                        var rect = Activator.CreateInstance(field.FieldType);
+                        var rectType = field.FieldType;
+                        rectType.GetField("X")?.SetValue(rect, x);
+                        rectType.GetField("Y")?.SetValue(rect, y);
+                        rectType.GetField("Width")?.SetValue(rect, w);
+                        rectType.GetField("Height")?.SetValue(rect, h);
+                        field.SetValue(asd, rect);
+
+                        MMI.RequestRedraw();
+                    }
+                    catch { }
+                };
+
+                apply();
+
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(MediumRetryDelayMs);
+                    RunOnUiThread(apply);
+                });
+            }
+            catch
+            {
+                // ignore
             }
         }
 
@@ -3637,12 +3732,14 @@ namespace vatSysWindowManager
         {
             try
             {
-                var menuField = asdControl.FindForm()?.GetType().GetField("mapsToolStripMenuItem", InstanceFlags);
-                var menu = menuField?.GetValue(asdControl.FindForm()) as ToolStripMenuItem;
+                var form = asdControl.FindForm();
+                var menuField = form?.GetType().GetField("mapsToolStripMenuItem", InstanceFlags);
+                var menu = menuField?.GetValue(form) as ToolStripMenuItem;
                 if (menu == null) return null;
 
+                var standardMapsOnly = IsASMGCS(form);
                 var list = new List<string>();
-                CollectCheckedMenuItems(menu.DropDownItems, list);
+                CollectCheckedMenuItems(menu.DropDownItems, list, standardMapsOnly);
                 return list;
             }
             catch
@@ -3651,12 +3748,19 @@ namespace vatSysWindowManager
             }
         }
 
-        private void CollectCheckedMenuItems(ToolStripItemCollection items, List<string> collector)
+        private void CollectCheckedMenuItems(ToolStripItemCollection items, List<string> collector, bool standardMapsOnly = false)
         {
             foreach (ToolStripItem item in items)
             {
                 if (item is ToolStripMenuItem mi)
                 {
+                    if (standardMapsOnly && !IsStandardVatSysMap(mi))
+                    {
+                        if (mi.HasDropDownItems)
+                            CollectCheckedMenuItems(mi.DropDownItems, collector, standardMapsOnly);
+                        continue;
+                    }
+
                     var key = GetMenuItemKey(mi);
                     if (mi.Checked && !string.IsNullOrEmpty(key))
                     {
@@ -3665,7 +3769,7 @@ namespace vatSysWindowManager
 
                     if (mi.HasDropDownItems)
                     {
-                        CollectCheckedMenuItems(mi.DropDownItems, collector);
+                        CollectCheckedMenuItems(mi.DropDownItems, collector, standardMapsOnly);
                     }
                 }
             }
@@ -3816,12 +3920,14 @@ namespace vatSysWindowManager
                 var menu = menuField?.GetValue(form) as ToolStripMenuItem;
                 if (menu == null) return;
 
+                var standardMapsOnly = IsASMGCS(form);
+
                 RunOnUiThread(() =>
                 {
                     try
                     {
                         EnsureMapMenuBuilt(form, menu);
-                        ApplyMapState(asd, menu.DropDownItems, desired, enforceVisibility: true);
+                        ApplyMapState(asd, menu.DropDownItems, desired, enforceVisibility: true, standardMapsOnly: standardMapsOnly);
                         asd?.Invalidate(true);
                         ScheduleMapRefresh(asd);
 
@@ -3832,7 +3938,7 @@ namespace vatSysWindowManager
                             {
                                 try
                                 {
-                                    ApplyMapState(asd, menu.DropDownItems, desired, enforceVisibility: true);
+                                    ApplyMapState(asd, menu.DropDownItems, desired, enforceVisibility: true, standardMapsOnly: standardMapsOnly);
                                     ScheduleMapRefresh(asd);
                                 }
                                 catch { }
@@ -3848,12 +3954,19 @@ namespace vatSysWindowManager
             }
         }
 
-        private void ApplyMapState(Control asdControl, ToolStripItemCollection items, HashSet<string> desired, bool enforceVisibility)
+        private void ApplyMapState(Control asdControl, ToolStripItemCollection items, HashSet<string> desired, bool enforceVisibility, bool standardMapsOnly = false)
         {
             foreach (ToolStripItem item in items)
             {
                 if (item is ToolStripMenuItem mi)
                 {
+                    if (standardMapsOnly && !IsStandardVatSysMap(mi))
+                    {
+                        if (mi.HasDropDownItems)
+                            ApplyMapState(asdControl, mi.DropDownItems, desired, enforceVisibility, standardMapsOnly);
+                        continue;
+                    }
+
                     var key = GetMenuItemKey(mi);
                     var shouldBeChecked = !string.IsNullOrWhiteSpace(key) && desired.Contains(key);
 
@@ -3868,7 +3981,7 @@ namespace vatSysWindowManager
 
                     if (mi.HasDropDownItems)
                     {
-                        ApplyMapState(asdControl, mi.DropDownItems, desired, enforceVisibility);
+                        ApplyMapState(asdControl, mi.DropDownItems, desired, enforceVisibility, standardMapsOnly);
                     }
                 }
             }
