@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A plain console runner, so the tests need nothing from NuGet. Run it with tests\Run.ps1.
+    It must be x86: one test loads the installed vatSys.exe to check that every internal member
+    the plugin looks up is really there.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <PlatformTarget>x86</PlatformTarget>
+    <AssemblyName>vatSysWindowManager.Tests</AssemblyName>
+    <RootNamespace>vatSysWindowManager.Tests</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <VatSysPath Condition="'$(VatSysPath)' == ''">$(registry:HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Sawbe\vatSys@Path)</VatSysPath>
+    <VatSysPath Condition="'$(VatSysPath)' == '' AND Exists('C:\Program Files (x86)\vatSys\bin\vatSys.exe')">C:\Program Files (x86)\vatSys</VatSysPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\vatSysWindowManager.csproj" />
+    <!-- Resolved at run time from the vatSys install (see Program.cs); nothing of vatSys's is copied. -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(VatSysPath)\bin\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PInvoke.User32">
+      <HintPath>$(VatSysPath)\bin\PInvoke.User32.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PInvoke.Windows.Core">
+      <HintPath>$(VatSysPath)\bin\PInvoke.Windows.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

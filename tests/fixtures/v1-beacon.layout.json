@@ -1,0 +1,28 @@
+{
+  "Position": "Test Approach",
+  "LayoutName": "Beacons",
+  "SavedUtc": "2026-01-02T08:51:07Z",
+  "Windows": [
+    {
+      "TypeName": "vatsys.StripWindow", "FormName": "beacon0StripWindow", "Title": "ADEP YMML",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 0, "Top": 0, "Right": 460, "Bottom": 131 },
+      "Metadata": { "Beacon": "YMML", "StripWindowType": "ADEP", "HMIState": "None" }
+    },
+    {
+      "TypeName": "vatsys.StripWindow", "FormName": "beacon1StripWindow", "Title": "Beacon BOYSE",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 0, "Top": 131, "Right": 460, "Bottom": 262 },
+      "Metadata": { "Beacon": "BOYSE", "StripWindowType": "Beacon", "HMIState": "None" }
+    },
+    {
+      "TypeName": "vatsys.StripWindow", "FormName": "otherStripWindow", "Title": "Other",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 0, "Top": 262, "Right": 460, "Bottom": 393 },
+      "Metadata": { "StripWindowType": "Other", "HMIState": "None" }
+    },
+    {
+      "TypeName": "vatsys.MainForm", "FormName": "MainForm", "Title": "vatSys",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 100, "Top": 100, "Right": 1700, "Bottom": 1000 },
+      "Metadata": { "DisplayPosition": "Test Approach", "Range": "120", "CentreLat": "-37.67", "CentreLon": "144.84" }
+    }
+  ],
+  "ControlledSectors": []
+}

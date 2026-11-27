@@ -1,73 +1,89 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+<Project Sdk="Microsoft.NET.Sdk">
+
   <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
-    <ProjectGuid>{07C21E24-3D73-4A59-A861-13C8CC810F17}</ProjectGuid>
-    <OutputType>Library</OutputType>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>vatSysWindowManager</RootNamespace>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <!-- vatSys.exe is x86, and the plugin loads into its process. -->
+    <PlatformTarget>x86</PlatformTarget>
+
     <AssemblyName>vatSysWindowManager</AssemblyName>
-    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-    <Deterministic>true</Deterministic>
-    <LangVersion>7.3</LangVersion>
+    <RootNamespace>vatSysWindowManager</RootNamespace>
+    <!--
+      Raise for every release. It is stamped as AssemblyVersion and FileVersion with a fourth part
+      of 0 (1.2.0 -> 1.2.0.0).
+
+      The vatSys Launcher installs this plugin from the latest GitHub release, so a release must be:
+        - tagged v<Version>.0 (v1.2.0.0): the launcher compares the tag with the DLL's FileVersion,
+          and a tag that is higher than the file inside would be offered as an update for ever;
+        - one asset, a zip, with vatSysWindowManager.dll at its root: the launcher takes the first
+          asset, extracts it into the plugin's folder, and only looks for the DLL at the top level.
+    -->
+    <Version>1.2.0</Version>
+    <Product>vatSys Window Manager</Product>
+    <AssemblyTitle>vatSys Window Manager</AssemblyTitle>
+    <Description>Saves and restores vatSys window layouts per position.</Description>
+    <Copyright>Copyright (c) 2025-2026</Copyright>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <OutputPath>..\..\vatSys Files\Profiles\Australia\Plugins\WindowManager\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-    <PlatformTarget>x86</PlatformTarget>
+
+  <PropertyGroup>
+    <VatSysPath Condition="'$(VatSysPath)' == ''">$(registry:HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Sawbe\vatSys@Path)</VatSysPath>
+    <VatSysPath Condition="'$(VatSysPath)' == '' AND Exists('C:\Program Files (x86)\vatSys\bin\vatSys.exe')">C:\Program Files (x86)\vatSys</VatSysPath>
+    <!--
+      The build goes to bin\<Configuration>\ and nowhere else. vatSys loads every DLL it finds under
+      its Plugins folders, so building straight into one risks the plugin being loaded twice. To
+      install a build, copy vatSysWindowManager.dll into <vatSys>\bin\Plugins\WindowManager\ while
+      vatSys is closed, or pass -p:OutputPath=... on the command line for a one-off.
+    -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <OutputPath>bin\Release\</OutputPath>
-    <DefineConstants>
-    </DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-    <PlatformTarget>x86</PlatformTarget>
-  </PropertyGroup>
+
+  <Target Name="EnsureVatSysPath" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(VatSysPath)' == ''" Text="Could not locate vatSys. Install it, or build with -p:VatSysPath=&quot;C:\Path\To\vatSys&quot; (the folder that contains bin\vatSys.exe)." />
+    <Error Condition="'$(VatSysPath)' != '' AND !Exists('$(VatSysPath)\bin\vatSys.exe')" Text="VatSysPath is '$(VatSysPath)' but '$(VatSysPath)\bin\vatSys.exe' does not exist." />
+  </Target>
+
   <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.ComponentModel.Composition" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Drawing" />
-    <Reference Include="System.Windows.Forms" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="Newtonsoft.Json, Version=12.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
-      <HintPath>C:\Program Files (x86)\vatSys\bin\Newtonsoft.Json.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="PInvoke.User32">
-      <HintPath>C:\Program Files (x86)\vatSys\bin\PInvoke.User32.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
-    <Reference Include="PInvoke.Windows.Core">
-      <HintPath>C:\Program Files (x86)\vatSys\bin\PInvoke.Windows.Core.dll</HintPath>
-      <Private>False</Private>
-    </Reference>
+    <Compile Remove="tests\**" />
+    <Compile Remove="bin\**" />
+    <Compile Remove="obj\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Compiled against the installed vatSys and the libraries it already loads. Private=False keeps
+      them out of the output folder: a second copy beside the plugin would be a different type
+      identity for IPlugin, and vatSys would not load the plugin.
+    -->
     <Reference Include="vatSys">
-      <HintPath>C:\Program Files (x86)\vatSys\bin\vatSys.exe</HintPath>
+      <HintPath>$(VatSysPath)\bin\vatSys.exe</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="VATSYSControls">
-      <HintPath>C:\Program Files (x86)\vatSys\bin\VATSYSControls.dll</HintPath>
+      <HintPath>$(VatSysPath)\bin\VATSYSControls.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(VatSysPath)\bin\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PInvoke.User32">
+      <HintPath>$(VatSysPath)\bin\PInvoke.User32.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="PInvoke.Windows.Core">
+      <HintPath>$(VatSysPath)\bin\PInvoke.Windows.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.ComponentModel.Composition" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
   </ItemGroup>
+
   <ItemGroup>
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <Compile Include="WindowManagerPlugin.cs" />
+    <InternalsVisibleTo Include="vatSysWindowManager.Tests" />
   </ItemGroup>
-  <ItemGroup>
-    <None Include="README.md" />
-  </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+
 </Project>

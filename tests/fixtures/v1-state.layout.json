@@ -1,0 +1,86 @@
+{
+  "Position": "Test TCU",
+  "LayoutName": "Test TCU",
+  "SavedUtc": "2026-02-11T10:14:56.5217943Z",
+  "Windows": [
+    {
+      "TypeName": "vatsys.MainForm", "FormName": "MainForm", "Title": "Test TCU",
+      "Placement": { "ShowCmd": 3, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": -6, "Top": 0, "Right": 1930, "Bottom": 1048 },
+      "Metadata": {
+        "DisplayPosition": "Test TCU", "Range": "209.000958305468", "AsdType": "MainASD",
+        "Maps": "Dynamic Infill;;ALL_CTA;;ALL_SECTORS;;SY_TCU",
+        "CentreLat": "-33.9460983276367", "CentreLon": "151.177200317383",
+        "ActualLeft": "-8", "ActualTop": "-8", "ActualRight": "1928", "ActualBottom": "1040", "WindowState": "Maximized"
+      }
+    },
+    {
+      "TypeName": "vatsys.StripSetupWindow", "FormName": "StripSetupWindow", "Title": "Strip Setup",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 261, "Top": 288, "Right": 800, "Bottom": 579 },
+      "Metadata": { "ActualLeft": "261", "ActualTop": "288", "ActualRight": "800", "ActualBottom": "579" }
+    },
+    {
+      "TypeName": "vatsys.VSCSWindow", "FormName": "VSCSWindow", "Title": "VSCS",
+      "Placement": { "ShowCmd": 2, "MinX": -32000, "MinY": -32000, "MaxX": -1, "MaxY": -1, "Left": 1919, "Top": 716, "Right": 2529, "Bottom": 1034 },
+      "Metadata": { "ActualLeft": "-32000", "ActualTop": "-32000", "ActualRight": "-31840", "ActualBottom": "-31972" }
+    },
+    {
+      "TypeName": "vatsys.StripWindow", "FormName": "jurisdictionStripWindow", "Title": "Jurisdiction",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 1456, "Top": 380, "Right": 1920, "Bottom": 511 },
+      "Metadata": { "StripWindowType": "State", "HMIState": "Jurisdiction", "ActualLeft": "1456", "ActualTop": "380", "ActualRight": "1920", "ActualBottom": "511" }
+    },
+    {
+      "TypeName": "vatsys.StripWindow", "FormName": "announcedStripWindow", "Title": "Announced",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 1456, "Top": 249, "Right": 1920, "Bottom": 380 },
+      "Metadata": { "StripWindowType": "State", "HMIState": "Announced", "ActualLeft": "1456", "ActualTop": "249", "ActualRight": "1920", "ActualBottom": "380" }
+    },
+    {
+      "TypeName": "vatsys.ASMGCSWindow", "FormName": "ASMGCSWindow", "Title": "Ground: YSSY",
+      "Placement": { "ShowCmd": 3, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": -1712, "Top": 208, "Right": -1027, "Bottom": 859 },
+      "Metadata": {
+        "DisplayPosition": "YSSY", "Range": "6.79788865530108", "AsdType": "Ground",
+        "Maps": "ASMGCS_YSSY_APR;;ASMGCS_YSSY_RWY",
+        "CentreLat": "-33.9457817077637", "CentreLon": "151.178421020508",
+        "ActualLeft": "-1928", "ActualTop": "-8", "ActualRight": "8", "ActualBottom": "1040", "WindowState": "Maximized"
+      }
+    },
+    {
+      "TypeName": "vatsys.ATISWindow", "FormName": "ATISWindow", "Title": "ATIS",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 1920, "Top": 339, "Right": 2213, "Bottom": 717 },
+      "Metadata": { "ActualLeft": "1920", "ActualTop": "339", "ActualRight": "2213", "ActualBottom": "717" }
+    },
+    {
+      "TypeName": "vatsys.ATISWindow", "FormName": "atis0Window", "Title": "YSSY ATIS",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 2503, "Top": 409, "Right": 2794, "Bottom": 717 },
+      "Metadata": { "ATISCallsign": "YSSY_ATIS", "ActualLeft": "2503", "ActualTop": "409", "ActualRight": "2794", "ActualBottom": "717" }
+    },
+    {
+      "TypeName": "vatsys.SequenceWindow", "FormName": "sequence0Window", "Title": "A:YSSY List",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 100, "Top": 100, "Right": 500, "Bottom": 400 },
+      "Metadata": { "SavedTitle": "A:YSSY List", "AirportHint": "YSSY" }
+    },
+    {
+      "TypeName": "vatsys.ChatWindow", "FormName": "ChatWindow", "Title": "ML-BIK_CTR",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 10, "Top": 10, "Right": 300, "Bottom": 200 },
+      "Metadata": { "Recipient": "ML-BIK_CTR", "ChatType": "Text" }
+    },
+    {
+      "TypeName": "vatsys.ChatWindow", "FormName": "SystemMessagesWindow", "Title": "System Messages",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 10, "Top": 300, "Right": 300, "Bottom": 500 },
+      "Metadata": { "ChatType": "System" }
+    },
+    {
+      "TypeName": "vatsys.FlightPlanWindow", "FormName": "FlightPlanWindow", "Title": "Flight Plan",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 10, "Top": 10, "Right": 300, "Bottom": 200 },
+      "Metadata": {}
+    },
+    {
+      "TypeName": "MaxRumsey.OzStripsPlugin.GUI.MainForm", "FormName": "MainForm", "Title": "OzStrips :: YSSY-VATSIM :: All",
+      "Placement": { "ShowCmd": 1, "MinX": -1, "MinY": -1, "MaxX": -1, "MaxY": -1, "Left": 2000, "Top": 0, "Right": 2900, "Bottom": 700 },
+      "Metadata": { "ActualLeft": "1993", "ActualTop": "0", "ActualRight": "2907", "ActualBottom": "707" }
+    }
+  ],
+  "Asd": { "LatitudeDeg": -33.946, "LongitudeDeg": 151.177, "Range": 209 },
+  "ControlledSectors": [ "SAS", "SFW" ],
+  "StripMode": "State",
+  "StripSortMode": "Alpha"
+}
